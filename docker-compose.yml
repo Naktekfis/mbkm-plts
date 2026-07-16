@@ -1,0 +1,257 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  # 1. TULANG PUNGGUNG KOMUNIKASI: MQTT Broker
+  mqtt_broker:
+    image: eclipse-mosquitto:1.6.15
+    container_name: mqtt_broker
+    ports:
+      - "1883:1883"
+    networks:
+      - microgrid_net
+    restart: always
+    logging: *default-logging
+
+  # 2. DATABASE LOKAL: PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres_microgrid
+    environment:
+      POSTGRES_DB:       microgrid_db
+      POSTGRES_USER:     microgrid_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      TZ:                Asia/Jakarta
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - microgrid_net
+    restart: always
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U microgrid_user -d microgrid_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 3. AGEN PENGINTIP: Tarik data dari MySQL Lab
+  service_sensor:
+    build: ./service_sensor
+    container_name: service_sensor
+    command: python kirim.py
+    environment:
+      - TZ=Asia/Jakarta
+      - PYTHONUNBUFFERED=1
+      - MQTT_BROKER=mqtt_broker
+      - MYSQL_HOST=${MYSQL_SENSOR_HOST:-192.168.1.147}
+      - MYSQL_PORT=${MYSQL_SENSOR_PORT:-3306}
+      - MYSQL_USER=${MYSQL_SENSOR_USER:-mahasiswa}
+      - MYSQL_PASS=${MYSQL_SENSOR_PASS:-change-me}
+      - MAX_SOURCE_AGE_SECONDS=${MAX_SOURCE_AGE_SECONDS:-180}
+      - MAX_SOURCE_SKEW_SECONDS=${MAX_SOURCE_SKEW_SECONDS:-120}
+    depends_on:
+      - mqtt_broker
+    networks:
+      - microgrid_net
+    restart: always
+    logging: *default-logging
+
+  # 4. PENCATAT DATA HISTORIS: Data Logger
+  service_logger:
+    build: ./service_logger
+    container_name: service_logger
+    environment:
+      - TZ=Asia/Jakarta
+      - PYTHONUNBUFFERED=1
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=microgrid_db
+      - DB_USER=microgrid_user
+      - DB_PASS=${POSTGRES_PASSWORD:-change-me}
+      - MQTT_BROKER=mqtt_broker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mqtt_broker:
+        condition: service_started
+    networks:
+      - microgrid_net
+    restart: always
+    logging: *default-logging
+
+  # 5. KALKULASI EKONOMI: Billing Engine
+  service_billing:
+    build: ./service_billing
+    container_name: service_billing
+    environment:
+      - TZ=Asia/Jakarta
+      - PYTHONUNBUFFERED=1
+      - MQTT_BROKER=mqtt_broker
+      - MAX_INTERVAL_SECONDS=${MAX_INTERVAL_SECONDS:-300}
+    depends_on:
+      - mqtt_broker
+    networks:
+      - microgrid_net
+    restart: always
+    logging: *default-logging
+
+  # 6. PENGAMBIL KEPUTUSAN: Rule-Based DSS
+  service_control:
+    build: ./service_control
+    container_name: service_control
+    environment:
+      - TZ=Asia/Jakarta
+      - PYTHONUNBUFFERED=1
+      - MQTT_BROKER=mqtt_broker
+    depends_on:
+      - mqtt_broker
+    networks:
+      - microgrid_net
+    restart: always
+    logging: *default-logging
+
+  # 7. ESTIMASI PV: Model PIML
+  service_estimation_pv:
+    build: ./pv_service_estimation
+    image: service_estimation_pv
+    container_name: service_estimation_pv
+    environment:
+      - TZ=Asia/Jakarta
+      - PYTHONUNBUFFERED=1
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=microgrid_db
+      - DB_USER=microgrid_user
+      - DB_PASS=${POSTGRES_PASSWORD:-change-me}
+      - MYSQL_WEATHER_HOST=${MYSQL_WEATHER_HOST:-192.168.1.147}
+      - MYSQL_WEATHER_PORT=${MYSQL_WEATHER_PORT:-3306}
+      - MYSQL_WEATHER_USER=${MYSQL_WEATHER_USER:-mahasiswa}
+      - MYSQL_WEATHER_PASS=${MYSQL_WEATHER_PASS:-change-me}
+      - ESTIMATOR_RETRY_MINUTES=${ESTIMATOR_RETRY_MINUTES:-10}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - microgrid_net
+    restart: always
+    logging: *default-logging
+
+  # 8. ESTIMASI LOAD: Model DNN
+  service_estimation_load:
+    build: ./load_service_estimation
+    image: service_estimation_load
+    container_name: service_estimation_load
+    environment:
+      - TZ=Asia/Jakarta
+      - PYTHONUNBUFFERED=1
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=microgrid_db
+      - DB_USER=microgrid_user
+      - DB_PASS=${POSTGRES_PASSWORD:-change-me}
+      - MYSQL_LOAD_HOST=${MYSQL_LOAD_HOST:-192.168.1.149}
+      - MYSQL_LOAD_PORT=${MYSQL_LOAD_PORT:-3306}
+      - MYSQL_LOAD_USER=${MYSQL_LOAD_USER:-mahasiswa}
+      - MYSQL_LOAD_PASS=${MYSQL_LOAD_PASS:-change-me}
+      - ESTIMATOR_RETRY_MINUTES=${ESTIMATOR_RETRY_MINUTES:-10}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - microgrid_net
+    restart: always
+    logging: *default-logging
+
+  # 9. ANTARMUKA HMI: Flask Web App
+  service_hmi:
+    build: ./service_hmi_flask
+    container_name: service_hmi_flask
+    ports:
+      - "5000:5000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - TZ=Asia/Jakarta
+      - PYTHONUNBUFFERED=1
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=microgrid_db
+      - DB_USER=microgrid_user
+      - DB_PASS=${POSTGRES_PASSWORD:-change-me}
+      - MAX_INTERVAL_SECONDS=${MAX_INTERVAL_SECONDS:-300}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      service_logger:
+        condition: service_started
+    networks:
+      - microgrid_net
+    restart: always
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health/ready', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # 10. WATCHDOG: Monitor & Auto-Recover Services
+  service_watchdog:
+    build: ./service_watchdog
+    container_name: service_watchdog
+    environment:
+      - TZ=Asia/Jakarta
+      - PYTHONUNBUFFERED=1
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=microgrid_db
+      - DB_USER=microgrid_user
+      - DB_PASS=${POSTGRES_PASSWORD:-change-me}
+      - HMI_URL=http://service_hmi:5000/health/ready
+      - RESTART_COOLDOWN_SECONDS=${RESTART_COOLDOWN_SECONDS:-600}
+      - MAX_RESTARTS=${MAX_RESTARTS:-3}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - microgrid_net
+    restart: always
+    logging: *default-logging
+
+  # 11. PEMANTAUAN: Validasi Data Sensor
+  service_pemantauan:
+    build: ./service_pemantauan
+    container_name: service_pemantauan
+    environment:
+      - TZ=Asia/Jakarta
+      - PYTHONUNBUFFERED=1
+      - MQTT_BROKER=mqtt_broker
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=microgrid_db
+      - DB_USER=microgrid_user
+      - DB_PASS=${POSTGRES_PASSWORD:-change-me}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mqtt_broker:
+        condition: service_started
+    networks:
+      - microgrid_net
+    restart: unless-stopped
+    logging: *default-logging
+# NETWORKS
+networks:
+  microgrid_net:
+    driver: bridge
+
+# VOLUMES
+volumes:
+  postgres_data:

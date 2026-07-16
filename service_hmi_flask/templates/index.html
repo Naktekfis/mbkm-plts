@@ -1,0 +1,984 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Microgrid Microservice Digital Twin</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'bg':       '#f4f7f9',
+                        'surface':  '#ffffff',
+                        'dark':     '#1e272e',
+                        'grid':     '#6c5ce7', 'grid-lt': '#a29bfe',
+                        'bess':     '#00b894', 'bess-lt': '#55efc4',
+                        'pv':       '#fdcb6e', 'pv-lt':   '#ffeaa7',
+                        'load':     '#0984e3', 'load-lt': '#74b9ff',
+                        'cyan':     '#00d8d6',
+                        'danger':   '#d63031',
+                        'muted':    '#b2bec3',
+                        'txt':      '#2d3436',
+                        'border':   '#dfe6e9',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'Segoe UI', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+                    },
+                    boxShadow: {
+                        'card':       '0 10px 25px rgba(0,0,0,0.04)',
+                        'card-hover': '0 14px 32px rgba(0,0,0,0.08)',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <link rel="icon" type="image/png" href="/static/img/favicon.png">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@1.2.1/dist/chartjs-plugin-zoom.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+    <style>
+        body { background-color: #f4f7f9; }
+
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50%       { opacity: 0.4; transform: scale(0.85); }
+        }
+        .live-dot { animation: pulse-dot 1.8s ease-in-out infinite; }
+
+        .tab-btn { transition: all 0.2s ease; border-bottom: 2px solid transparent; }
+        .tab-btn.active { border-bottom-color: #6c5ce7; color: #6c5ce7; }
+        .tab-btn:not(.active):hover { color: #2d3436; border-bottom-color: #dfe6e9; }
+
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+
+        .icon-grid { background: linear-gradient(135deg, #6c5ce7, #a29bfe); }
+        .icon-bess { background: linear-gradient(135deg, #00b894, #55efc4); }
+        .icon-pv   { background: linear-gradient(135deg, #fdcb6e, #ffeaa7); }
+        .icon-load { background: linear-gradient(135deg, #0984e3, #74b9ff); }
+        .icon-eco  { background: linear-gradient(135deg, #00d8d6, #55efc4); }
+        .icon-dss  { background: linear-gradient(135deg, #6c5ce7, #00d8d6); }
+
+        .pf-node {
+            background: white;
+            border-radius: 16px;
+            border: 2px solid #dfe6e9;
+            padding: 16px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.05);
+            transition: border-color 0.3s ease;
+        }
+        .pf-node.online  { border-color: #00b894 !important; }
+        .pf-node.offline { border-color: #d63031 !important; }
+
+        .rf-bar { transition: width 1.2s ease; }
+
+        .donut-wrap { position: relative; }
+        .donut-center {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center; pointer-events: none;
+        }
+
+        .neraca-seg { transition: width 1s ease; }
+
+        .rule-card { transition: all 0.3s ease; }
+        .rule-card.active-rule {
+            border-color: #6c5ce7 !important;
+            background: rgba(108,92,231,0.06) !important;
+        }
+        .dss-main-card { transition: all 0.4s ease; }
+
+        .chart-h-sm { height: 130px; }
+        .chart-h-md { height: 180px; }
+        .chart-h-lg { height: 220px; }
+
+        .badge-online  { background: rgba(0,184,148,0.12);  color: #00b894; border: 1px solid rgba(0,184,148,0.3);  }
+        .badge-offline { background: rgba(214,48,49,0.12);  color: #d63031; border: 1px solid rgba(214,48,49,0.3);  }
+        .badge-monitor { background: rgba(9,132,227,0.12);  color: #0984e3; border: 1px solid rgba(9,132,227,0.3);  }
+
+        .log-table tr:hover td { background: rgba(108,92,231,0.04); }
+        .eco-hero { background: linear-gradient(135deg, #1e272e 0%, #2d3436 100%); }
+
+        canvas { cursor: crosshair; }
+        canvas:active { cursor: grabbing; }
+
+        .btn-reset-zoom {
+            font-size: 9px; padding: 2px 8px; border-radius: 6px;
+            border: 1px solid #dfe6e9; color: #b2bec3; background: white;
+            cursor: pointer; transition: all 0.15s; line-height: 1.6;
+        }
+        .btn-reset-zoom:hover { border-color: #6c5ce7; color: #6c5ce7; }
+
+        ::-webkit-scrollbar { width: 5px; height: 5px; }
+        ::-webkit-scrollbar-track { background: #f4f7f9; }
+        ::-webkit-scrollbar-thumb { background: #b2bec3; border-radius: 10px; }
+
+        .lucide { display: inline-block; vertical-align: middle; }
+
+        .hist-btn-preset {
+            padding: 6px 14px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 700;
+            border: 1px solid #dfe6e9;
+            color: #b2bec3;
+            background: white;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .hist-btn-preset:hover { border-color: #6c5ce7; color: #6c5ce7; }
+        input[type="date"] {
+            border: 1px solid #dfe6e9;
+            border-radius: 10px;
+            padding: 6px 12px;
+            font-size: 13px;
+            font-family: 'JetBrains Mono', monospace;
+            color: #2d3436;
+            background: white;
+            outline: none;
+        }
+        input[type="date"]:focus { border-color: #6c5ce7; }
+    </style>
+</head>
+<body class="min-h-screen font-sans text-txt" style="background:#f4f7f9;">
+
+<!-- ═══════════════ HEADER ═══════════════ -->
+<header class="bg-surface border-b border-border shadow-sm sticky top-0 z-50">
+    <div class="flex items-center justify-between px-6 py-3">
+        <div class="flex items-center gap-3">
+            <div class="w-8 h-8 rounded-lg overflow-hidden flex items-center justify-center">
+                <img src="/static/img/logo_me.png" style="width:32px;height:32px;object-fit:cover;">
+            </div>
+            <div>
+                <div class="font-bold text-sm text-txt leading-tight">Smart Microgrid Microservice Digital Twin</div>
+                <div class="text-xs text-muted font-mono">Lab. Energy Management, Engineering Physics, ITB</div>
+            </div>
+        </div>
+        <div class="flex items-center gap-2">
+            <div class="live-dot w-2 h-2 rounded-full bg-bess"></div>
+            <span class="text-xs font-mono font-bold text-bess">LIVE · 2s poll</span>
+        </div>
+    </div>
+
+    <div class="flex gap-0 px-6 overflow-x-auto border-t border-border">
+        <button class="tab-btn active px-4 py-2.5 text-xs font-semibold text-muted whitespace-nowrap inline-flex items-center gap-1.5"
+                onclick="switchTab('overview', this)">
+            <i data-lucide="activity" style="width:14px;height:14px;"></i>Overview
+        </button>
+        <button class="tab-btn px-4 py-2.5 text-xs font-semibold text-muted whitespace-nowrap inline-flex items-center gap-1.5"
+                onclick="switchTab('pv', this)">
+            <i data-lucide="sun" style="width:14px;height:14px;"></i>Digital Model PV
+        </button>
+        <button class="tab-btn px-4 py-2.5 text-xs font-semibold text-muted whitespace-nowrap inline-flex items-center gap-1.5"
+                onclick="switchTab('bess', this)">
+            <i data-lucide="battery-medium" style="width:14px;height:14px;"></i>Digital Model BESS
+        </button>
+        <button class="tab-btn px-4 py-2.5 text-xs font-semibold text-muted whitespace-nowrap inline-flex items-center gap-1.5"
+                onclick="switchTab('load', this)">
+            <i data-lucide="home" style="width:14px;height:14px;"></i>Digital Model Load
+        </button>
+        <button class="tab-btn px-4 py-2.5 text-xs font-semibold text-muted whitespace-nowrap inline-flex items-center gap-1.5"
+                onclick="switchTab('ekonomi', this)">
+            <i data-lucide="dollar-sign" style="width:14px;height:14px;"></i>Billing Efficiency
+        </button>
+        <button class="tab-btn px-4 py-2.5 text-xs font-semibold text-muted whitespace-nowrap inline-flex items-center gap-1.5"
+                onclick="switchTab('dss', this)">
+            <i data-lucide="cpu" style="width:14px;height:14px;"></i>Control Logic / DSS
+        </button>
+        <button class="tab-btn px-4 py-2.5 text-xs font-semibold text-muted whitespace-nowrap inline-flex items-center gap-1.5"
+                onclick="switchTab('history', this)">
+            <i data-lucide="history" style="width:14px;height:14px;"></i>Historical Analysis
+        </button>
+        <button class="tab-btn px-4 py-2.5 text-xs font-semibold text-muted whitespace-nowrap inline-flex items-center gap-1.5"
+                onclick="switchTab('validity', this)">
+            <i data-lucide="shield-check" style="width:14px;height:14px;"></i>Validity & Microservice
+        </button>
+    </div>
+</header>
+
+<main class="p-5">
+
+<!-- ═══════════════════════════════════════
+     TAB 1 — OVERVIEW
+═══════════════════════════════════════ -->
+<div id="tab-overview" class="tab-panel active">
+
+    <div class="bg-surface rounded-2xl shadow-card p-5 mb-5">
+        <p class="text-xs font-bold text-muted uppercase tracking-widest mb-4">Aliran Daya Real-Time</p>
+        <div id="pf-container" style="position:relative; width:100%; min-height:640px;">
+
+            <!-- ══ BARIS ATAS: PV System | PV Inverter | Distribution Panel | Beban ══ -->
+
+            <!-- Modul PV — kiri atas -->
+            <div id="node-pv" class="pf-node" style="position:absolute;
+                top:20px; left:0; width:170px; padding:12px; box-sizing:border-box;">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                    <div class="icon-pv" style="width:40px;height:40px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                        <i data-lucide="sun" style="width:18px;height:18px;color:#2d3436;"></i>
+                    </div>
+                    <div>
+                        <p style="font-size:8px;font-weight:700;color:#b2bec3;text-transform:uppercase;letter-spacing:1px;margin:0;">PV System</p>
+                        <p class="font-mono" style="font-size:17px;font-weight:800;color:#fdcb6e;margin:0;line-height:1.1;" id="t-pv">— W</p>
+                        <p style="font-size:8px;font-weight:600;color:#b2bec3;margin:0;letter-spacing:0.5px;">PVDC Total</p>
+                    </div>
+                </div>
+                <p class="font-mono" style="font-size:10px;color:#b2bec3;margin:0 0 2px;">PVAC: <span id="t-pac-pv" style="color:#fdcb6e;font-weight:700;">—</span></p>
+                <p class="font-mono" style="font-size:10px;color:#b2bec3;margin:0 0 6px;">Freq: <span id="t-freq-pv" style="color:#fdcb6e;font-weight:700;">—</span></p>
+                <span class="badge-offline" style="display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:20px;font-size:9px;font-weight:700;" id="t-status-pv">● OFFLINE</span>
+            </div>
+
+            <!-- PV Inverter — 30% dari kiri -->
+            <div id="node-pvinv" style="position:absolute;
+                top:44px; left:28%; transform:translateX(-50%);
+                background:white; border:2px solid #fdcb6e; border-radius:14px;
+                padding:10px 14px; text-align:center;
+                box-shadow:0 4px 14px rgba(0,0,0,0.07);
+                min-width:100px; z-index:5; box-sizing:border-box;">
+                <div style="width:32px;height:32px;border-radius:9px;
+                            background:linear-gradient(135deg,#fdcb6e,#ffeaa7);
+                            display:flex;align-items:center;justify-content:center;margin:0 auto 5px;">
+                    <i data-lucide="zap" style="width:14px;height:14px;color:#2d3436;"></i>
+                </div>
+                <p style="font-size:8px;font-weight:700;color:#636e72;
+                          text-transform:uppercase;letter-spacing:0.5px;margin:0 0 3px;line-height:1.5;">
+                    PV Inverter
+                </p>
+                <p class="font-mono" style="font-size:10px;font-weight:700;color:#fdcb6e;margin:0;" id="t-pvac">— W</p>
+            </div>
+
+            <!-- Distribution Panel — 50% dari kiri -->
+            <div id="dp-panel" style="position:absolute;
+                top:44px; left:50%; transform:translateX(-50%);
+                background:white; border:2px solid #dfe6e9; border-radius:14px;
+                padding:10px 14px; text-align:center;
+                box-shadow:0 4px 14px rgba(0,0,0,0.07);
+                min-width:110px; z-index:5; box-sizing:border-box;">
+                <div style="width:32px;height:32px;border-radius:9px;
+                            background:linear-gradient(135deg,#636e72,#b2bec3);
+                            display:flex;align-items:center;justify-content:center;margin:0 auto 5px;">
+                    <i data-lucide="panel-top" style="width:14px;height:14px;color:white;"></i>
+                </div>
+                <p style="font-size:8px;font-weight:700;color:#636e72;
+                          text-transform:uppercase;letter-spacing:0.5px;margin:0;line-height:1.5;">
+                    Distribution<br>Panel
+                </p>
+            </div>
+
+            <!-- Beban — kanan atas -->
+            <div id="node-load" class="pf-node" style="position:absolute;
+                top:20px; right:0; width:170px; padding:12px; box-sizing:border-box;
+                border-color:#0984e3 !important;">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                    <div class="icon-load" style="width:40px;height:40px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                        <i data-lucide="building-2" style="width:18px;height:18px;color:white;"></i>
+                    </div>
+                    <div>
+                        <p style="font-size:8px;font-weight:700;color:#b2bec3;text-transform:uppercase;letter-spacing:1px;margin:0;">Beban</p>
+                        <p class="font-mono" style="font-size:17px;font-weight:800;color:#0984e3;margin:0;line-height:1.1;" id="t-load">— W</p>
+                        <p style="font-size:8px;font-weight:600;color:#b2bec3;margin:0;letter-spacing:0.5px;">Psmartmeter</p>
+                    </div>
+                </div>
+                <p class="font-mono" style="font-size:10px;color:#b2bec3;margin:0 0 2px;">Power: <span id="t-load-w" style="color:#0984e3;font-weight:700;">—</span></p>
+                <p class="font-mono" style="font-size:10px;color:#b2bec3;margin:0 0 6px;">Freq: <span id="t-freq-load" style="color:#0984e3;font-weight:700;">—</span></p>
+                <span class="badge-monitor" style="display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:20px;font-size:9px;font-weight:700;">● MONITORING</span>
+            </div>
+
+            <!-- ══ BARIS BAWAH: PLN | Hybrid Inverter | Baterai — sejajar horizontal ══ -->
+
+            <!-- PLN — kiri bawah -->
+            <div id="node-grid" class="pf-node" style="position:absolute;
+                top:248px; left:0; width:170px; padding:12px; box-sizing:border-box;">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                    <div class="icon-grid" style="width:40px;height:40px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                        <i data-lucide="plug-zap" style="width:18px;height:18px;color:white;"></i>
+                    </div>
+                    <div>
+                        <p style="font-size:8px;font-weight:700;color:#b2bec3;text-transform:uppercase;letter-spacing:1px;margin:0;">PLN</p>
+                        <p class="font-mono" style="font-size:17px;font-weight:800;color:#6c5ce7;margin:0;line-height:1.1;" id="t-grid">— VA</p>
+                        <p style="font-size:8px;font-weight:600;color:#b2bec3;margin:0;letter-spacing:0.5px;">PPLN</p>
+                    </div>
+                </div>
+                <p class="font-mono" style="font-size:10px;color:#b2bec3;margin:0 0 2px;">Vtg: <span id="t-grid-w" style="color:#6c5ce7;font-weight:700;">—</span></p>
+                <p class="font-mono" style="font-size:10px;color:#b2bec3;margin:0 0 6px;">Freq: <span id="t-freq-grid" style="color:#6c5ce7;font-weight:700;">—</span></p>
+                <span class="badge-offline" style="display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:20px;font-size:9px;font-weight:700;" id="t-status-grid">● OFFLINE</span>
+            </div>
+
+            <!-- Hybrid Inverter — tengah bawah (sejajar PLN & BESS) -->
+            <div id="node-si" style="position:absolute;
+                top:240px; left:50%; transform:translateX(-50%);
+                background:white; border:2px solid #dfe6e9; border-radius:14px;
+                padding:12px 16px; text-align:center;
+                box-shadow:0 4px 14px rgba(0,0,0,0.07);
+                min-width:140px; z-index:5; box-sizing:border-box;">
+                <div style="width:32px;height:32px;border-radius:9px;
+                            background:linear-gradient(135deg,#6c5ce7,#a29bfe);
+                            display:flex;align-items:center;justify-content:center;margin:0 auto 5px;">
+                    <i data-lucide="cpu" style="width:14px;height:14px;color:white;"></i>
+                </div>
+                <p style="font-size:8px;font-weight:700;color:#636e72;
+                          text-transform:uppercase;letter-spacing:0.5px;margin:0 0 4px;line-height:1.5;">
+                    Hybrid Inverter
+                </p>
+                <p class="font-mono" style="font-size:11px;font-weight:700;color:#6c5ce7;margin:0 0 1px;" id="t-pinv">— W</p>
+                <p class="font-mono" style="font-size:9px;color:#b2bec3;margin:0;" id="t-freq-bess-si">— Hz</p>
+                <span class="badge-offline" style="display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:20px;font-size:9px;font-weight:700;margin-top:6px;" id="t-status-bess">● OFFLINE</span>
+            </div>
+
+            <!-- Baterai — bawah tengah (di bawah Hybrid Inverter) -->
+            <div id="node-bess" class="pf-node" style="position:absolute;
+                top:470px; left:50%; transform:translateX(-50%);
+                width:200px; padding:12px; box-sizing:border-box;">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                    <div class="icon-bess" style="width:40px;height:40px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                        <i data-lucide="battery-charging" style="width:18px;height:18px;color:white;"></i>
+                    </div>
+                    <div>
+                        <p style="font-size:8px;font-weight:700;color:#b2bec3;text-transform:uppercase;letter-spacing:1px;margin:0;">Baterai (BESS)</p>
+                        <p class="font-mono" style="font-size:17px;font-weight:800;color:#00b894;margin:0;line-height:1.1;" id="t-soc">— %</p>
+                        <p style="font-size:8px;font-weight:600;color:#b2bec3;margin:0;letter-spacing:0.5px;">SoC</p>
+                    </div>
+                </div>
+                <p class="font-mono" style="font-size:10px;color:#b2bec3;margin:0 0 6px;">P DC: <span id="t-bess-freq-sub" style="color:#00b894;font-weight:700;">—</span></p>
+                <span id="t-bess-freq-val" style="display:none;"></span>
+            </div>
+
+            <svg id="pf-svg" style="position:absolute;top:0;left:0;width:100%;height:100%;overflow:visible;pointer-events:none;z-index:3;"></svg>
+        </div>
+    </div>
+
+    <!-- KPI Summary Cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-2">RE Saving</p>
+            <p class="text-2xl font-bold font-mono text-bess" id="ov-resave">Rp 0</p>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-2">Renewable Fraction</p>
+            <p class="text-2xl font-bold font-mono text-cyan" id="ov-rf">0%</p>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-2">DSS Status</p>
+            <p class="text-base font-bold leading-tight" id="ov-dss-status">—</p>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-2">SoC Baterai</p>
+            <p class="text-2xl font-bold font-mono text-bess" id="ov-soc">0%</p>
+            <div class="mt-2 pt-2 border-t border-border" style="display:flex;flex-direction:column;gap:2px;">
+                <p class="font-mono" style="font-size:10px;color:#b2bec3;margin:0;">
+                    P Inv: <span id="ov-bess-ac" style="color:#00d8d6;font-weight:700;">— W</span>
+                </p>
+                <p class="font-mono" style="font-size:10px;color:#b2bec3;margin:0;">
+                    P DC: <span id="ov-bess-dc" style="color:#00b894;font-weight:700;">— W</span>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Mini Charts -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold text-bess uppercase tracking-widest">Tren SoC Baterai (%)</p>
+                <button class="btn-reset-zoom" onclick="charts.ovSoc.resetZoom()">↺ Reset</button>
+            </div>
+            <div class="chart-h-sm"><canvas id="ov-chart-soc"></canvas></div>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold uppercase tracking-widest" style="color:#00d8d6">Tren Produksi PV (W)</p>
+                <button class="btn-reset-zoom" onclick="charts.ovPv.resetZoom()">↺ Reset</button>
+            </div>
+            <div class="chart-h-sm"><canvas id="ov-chart-pv"></canvas></div>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold text-load uppercase tracking-widest">Tren Beban Gedung (W)</p>
+                <button class="btn-reset-zoom" onclick="charts.ovLoad.resetZoom()">↺ Reset</button>
+            </div>
+            <div class="chart-h-sm"><canvas id="ov-chart-load"></canvas></div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════
+     TAB 2 — DIGITAL MODEL PV
+═══════════════════════════════════════ -->
+<div id="tab-pv" class="tab-panel">
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="w-10 h-10 icon-pv rounded-xl flex items-center justify-center mb-3">
+                <i data-lucide="sun" style="width:18px;height:18px;color:#2d3436;"></i>
+            </div>
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">PV DC Total</p>
+            <p class="text-2xl font-bold font-mono" style="color:#fdcb6e" id="pv-total">0 W</p>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center mb-3" style="background:linear-gradient(135deg,#fdcb6e,#e17055)">
+                <i data-lucide="zap" style="width:18px;height:18px;color:white;"></i>
+            </div>
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">String A</p>
+            <p class="text-2xl font-bold font-mono" style="color:#fdcb6e" id="pv-a">0 W</p>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center mb-3" style="background:linear-gradient(135deg,#e17055,#d63031)">
+                <i data-lucide="zap" style="width:18px;height:18px;color:white;"></i>
+            </div>
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">String B</p>
+            <p class="text-2xl font-bold font-mono" style="color:#e17055" id="pv-b">0 W</p>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="w-10 h-10 icon-eco rounded-xl flex items-center justify-center mb-3">
+                <i data-lucide="activity" style="width:18px;height:18px;color:white;"></i>
+            </div>
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">Output AC Inverter</p>
+            <p class="text-2xl font-bold font-mono text-cyan" id="pv-pac">0 W</p>
+        </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="w-10 h-10 icon-bess rounded-xl flex items-center justify-center mb-3">
+                <i data-lucide="gauge" style="width:18px;height:18px;color:white;"></i>
+            </div>
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">Efisiensi Inverter</p>
+            <p class="text-2xl font-bold font-mono text-bess" id="pv-eff">— %</p>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold text-muted uppercase tracking-widest">Frekuensi & Status</p>
+                <span class="inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold badge-offline" id="pv-status">● OFFLINE</span>
+            </div>
+            <p class="text-2xl font-bold font-mono text-load" id="pv-freq">— Hz</p>
+        </div>
+    </div>
+    <div class="bg-surface rounded-2xl shadow-card p-4 mb-4">
+        <div class="flex items-center justify-between mb-3">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest">PV Aktual vs Prediksi PIML (W)</p>
+            <button class="btn-reset-zoom" onclick="charts.pvTotal.resetZoom()">↺ Reset</button>
+        </div>
+        <div class="chart-h-lg"><canvas id="pv-chart-total"></canvas></div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold uppercase tracking-widest" style="color:#fdcb6e">Tren String A (W)</p>
+                <button class="btn-reset-zoom" onclick="charts.pvA.resetZoom()">↺ Reset</button>
+            </div>
+            <div class="chart-h-md"><canvas id="pv-chart-a"></canvas></div>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold uppercase tracking-widest" style="color:#e17055">Tren String B (W)</p>
+                <button class="btn-reset-zoom" onclick="charts.pvB.resetZoom()">↺ Reset</button>
+            </div>
+            <div class="chart-h-md"><canvas id="pv-chart-b"></canvas></div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════
+     TAB 3 — DIGITAL MODEL BESS
+═══════════════════════════════════════ -->
+<div id="tab-bess" class="tab-panel">
+
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
+        <!-- Card 1: SoC -->
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="w-10 h-10 icon-bess rounded-xl flex items-center justify-center mb-3">
+                <i data-lucide="battery-charging" style="width:18px;height:18px;color:white;"></i>
+            </div>
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">State of Charge</p>
+            <p class="text-2xl font-bold font-mono text-bess" id="bess-soc">0 %</p>
+        </div>
+        <!-- Card 2: P_Inverter + Freq + Status -->
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-2">
+                <div class="w-10 h-10 icon-eco rounded-xl flex items-center justify-center">
+                    <i data-lucide="zap" style="width:18px;height:18px;color:white;"></i>
+                </div>
+                <span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-bold badge-offline" id="bess-status">● OFFLINE</span>
+            </div>
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">P_Inverter (Hybrid)</p>
+            <p class="text-2xl font-bold font-mono text-cyan" id="bess-power">0 W</p>
+            <p class="text-xs text-muted mt-1" id="bess-mode-label">Standby</p>
+            <div class="mt-2 pt-2 border-t border-border">
+                <p class="font-mono" style="font-size:10px;color:#b2bec3;margin:0;">
+                    Freq: <span style="color:#0984e3;font-weight:700;" id="bess-freq">— Hz</span>
+                </p>
+                <p class="font-mono" style="font-size:10px;color:#b2bec3;margin:2px 0 0;">
+                    Vac×Iac: <span style="color:#00d8d6;font-weight:700;" id="bess-power-ac-sub">—</span>
+                </p>
+            </div>
+        </div>
+        <!-- Card 3: P_BESS DC -->
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center mb-3"
+                 style="background:linear-gradient(135deg,#00b894,#55efc4);">
+                <i data-lucide="battery-medium" style="width:18px;height:18px;color:white;"></i>
+            </div>
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">P_BESS DC</p>
+            <p class="text-2xl font-bold font-mono text-bess" id="bess-power-dc">0 W</p>
+            <p class="text-xs text-muted mt-1 font-mono">BatVtg × TotBatCur</p>
+            <div class="mt-2 pt-2 border-t border-border">
+                <p class="font-mono" style="font-size:10px;color:#b2bec3;margin:0;">
+                    (+) Discharge &nbsp;|&nbsp; (−) Charging
+                </p>
+            </div>
+        </div>
+        <!-- Card 4: ESSA -->
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center mb-3"
+                 style="background:linear-gradient(135deg,#6c5ce7,#a29bfe);">
+                <i data-lucide="battery-full" style="width:18px;height:18px;color:white;"></i>
+            </div>
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">ESSA</p>
+            <p class="text-2xl font-bold font-mono text-bess" id="bess-essa">0.00 jam</p>
+            <p class="text-xs text-muted mt-1 font-mono">(20.480 Wh × SoC%) / Load</p>
+        </div>
+    </div>
+
+    <!-- 3 Chart BESS -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold text-bess uppercase tracking-widest">Tren SoC Baterai (%)</p>
+                <button class="btn-reset-zoom" onclick="charts.bessSoc.resetZoom()">↺ Reset</button>
+            </div>
+            <div class="chart-h-lg"><canvas id="bess-chart-soc"></canvas></div>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold text-cyan uppercase tracking-widest">Tren P_Inverter (W)</p>
+                <button class="btn-reset-zoom" onclick="charts.bessInverter.resetZoom()">↺ Reset</button>
+            </div>
+            <div class="chart-h-lg"><canvas id="bess-chart-inverter"></canvas></div>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold text-bess uppercase tracking-widest">Tren P_BESS DC (W)</p>
+                <button class="btn-reset-zoom" onclick="charts.bessDcPower.resetZoom()">↺ Reset</button>
+            </div>
+            <div class="chart-h-lg"><canvas id="bess-chart-dc"></canvas></div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════
+     TAB 4 — DIGITAL MODEL LOAD
+═══════════════════════════════════════ -->
+<div id="tab-load" class="tab-panel">
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="w-10 h-10 icon-load rounded-xl flex items-center justify-center mb-3">
+                <i data-lucide="building-2" style="width:18px;height:18px;color:white;"></i>
+            </div>
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">Beban Gedung Lab ME</p>
+            <p class="text-2xl font-bold font-mono text-load" id="load-val">0 W</p>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="w-10 h-10 icon-bess rounded-xl flex items-center justify-center mb-3">
+                <i data-lucide="leaf" style="width:18px;height:18px;color:white;"></i>
+            </div>
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">Supply EBT Tersedia</p>
+            <p class="text-2xl font-bold font-mono text-bess" id="load-ebt">0 W</p>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">Neraca Daya</p>
+            <p class="text-2xl font-bold font-mono" id="load-neraca">0 W</p>
+            <p class="text-xs text-muted mt-1" id="load-neraca-label">Supply − Load</p>
+        </div>
+    </div>
+    <div class="bg-surface rounded-2xl shadow-card p-4 mb-5">
+        <p class="text-xs font-bold text-muted uppercase tracking-widest mb-3">Komposisi Supply ke Beban</p>
+        <div class="flex rounded-xl overflow-hidden h-7 mb-3">
+            <div class="neraca-seg" id="neraca-pv"   style="width:33%;background:#fdcb6e;"></div>
+            <div class="neraca-seg" id="neraca-bess" style="width:33%;background:#00b894;"></div>
+            <div class="neraca-seg" id="neraca-pln"  style="width:34%;background:#6c5ce7;"></div>
+        </div>
+        <div class="flex gap-5 text-xs">
+            <span style="color:#fdcb6e">■ PV (Pac inverter)</span>
+            <span style="color:#00b894">■ BESS discharge</span>
+            <span style="color:#6c5ce7">■ PLN</span>
+        </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold text-load uppercase tracking-widest">Tren Beban Gedung Lab ME (W)</p>
+                <button class="btn-reset-zoom" onclick="charts.loadTrend.resetZoom()">↺ Reset</button>
+            </div>
+            <div class="chart-h-md"><canvas id="load-chart"></canvas></div>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold text-bess uppercase tracking-widest">Beban Aktual vs Estimasi Model (W)</p>
+                <button class="btn-reset-zoom" onclick="charts.loadCompare.resetZoom()">↺ Reset</button>
+            </div>
+            <div class="chart-h-md"><canvas id="load-chart-compare"></canvas></div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════
+     TAB 5 — BILLING EFFICIENCY
+═══════════════════════════════════════ -->
+<div id="tab-ekonomi" class="tab-panel">
+    <div class="eco-hero rounded-2xl p-6 mb-5">
+        <p class="text-xs font-mono font-bold text-muted uppercase tracking-widest mb-3">Economic Mirror · CRF Model · Jurnal</p>
+        <p class="text-3xl font-bold font-mono text-cyan mb-1">RE Save: <span id="ek-resave">Rp 0,00</span></p>
+        <p class="text-sm mb-4" style="color:#f9ca24">
+            Est. LCOE: <span id="ek-lcoe" class="font-mono" style="color:white;">Rp 0 / kWh</span>
+            &nbsp;·&nbsp; Tarif PLN: <span class="font-mono text-danger">Rp 955,00 / kWh</span>
+        </p>
+        <div class="bg-white bg-opacity-10 rounded-full h-3 overflow-hidden">
+            <div class="rf-bar h-full rounded-full" style="width:0%;background:linear-gradient(90deg,#00b894,#00d8d6)" id="ek-rf-bar"></div>
+        </div>
+        <div class="flex justify-between mt-2 text-xs">
+            <span class="text-muted">Renewable Fraction</span>
+            <span class="font-bold font-mono text-bess" id="ek-rf">0%</span>
+        </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">Biaya Jika Semua PLN</p>
+            <p class="text-xl font-bold font-mono text-danger" id="ek-biaya-pln">Rp 0</p>
+            <p class="text-xs text-muted mt-1">Tanpa sistem EBT</p>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">Biaya Aktual (dengan EBT)</p>
+            <p class="text-xl font-bold font-mono text-bess" id="ek-biaya-aktual">Rp 0</p>
+            <p class="text-xs text-muted mt-1">Setelah penghematan EBT</p>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-1">Total Penghematan</p>
+            <p class="text-xl font-bold font-mono text-cyan" id="ek-penghematan">Rp 0</p>
+            <p class="text-xs text-muted mt-1">Biaya PLN − Biaya Aktual</p>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-1 gap-4 mb-5">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+                <div style="width:36px;height:36px;border-radius:10px;
+                            background:linear-gradient(135deg,#00d8d6,#55efc4);
+                            display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                    <i data-lucide="leaf" style="width:16px;height:16px;color:white;"></i>
+                </div>
+                <div>
+                    <p class="text-xs font-bold text-muted uppercase tracking-widest">Reduksi Emisi CO₂</p>
+                    <p class="text-xs text-muted font-mono">Environmental KPI · RUPTL PLN 2021-2030</p>
+                </div>
+            </div>
+            <p class="text-3xl font-bold font-mono text-cyan" id="ek-co2">0.0000 <span style="font-size:16px;font-weight:500;">kg</span></p>
+            <p class="text-xs text-muted mt-2">Akumulasi CO₂ tereduksi sesi ini</p>
+            <div style="margin-top:10px;padding:8px 10px;background:rgba(0,216,214,0.06);border-radius:8px;border-left:3px solid #00d8d6;">
+                <p class="text-xs font-mono text-muted">Formula: EBT terpakai (kWh) × 0.87 kg/kWh</p>
+            </div>
+        </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-3">Bauran Energi Konsumsi (EBT vs PLN)</p>
+            <div class="donut-wrap" style="height:220px;">
+                <canvas id="ek-chart-mix"></canvas>
+                <div class="donut-center">
+                    <p class="text-2xl font-bold font-mono text-cyan" id="ek-donut-pct">0%</p>
+                    <p class="text-xs text-muted">EBT</p>
+                </div>
+            </div>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-4">Parameter Keekonomian</p>
+            <table class="w-full text-sm">
+                <tbody>
+                    <tr class="border-b border-border"><td class="py-2.5 text-muted">Tarif PLN</td><td class="py-2.5 font-mono font-bold text-danger">Rp 955,00 / kWh</td></tr>
+                    <tr class="border-b border-border"><td class="py-2.5 text-muted">CAPEX Sistem</td><td class="py-2.5 font-mono">Rp 282.300.935</td></tr>
+                    <tr class="border-b border-border"><td class="py-2.5 text-muted">OPEX / tahun</td><td class="py-2.5 font-mono">Rp 6.840.000</td></tr>
+                    <tr class="border-b border-border"><td class="py-2.5 text-muted">Discount Rate (i)</td><td class="py-2.5 font-mono">5%</td></tr>
+                    <tr><td class="py-2.5 text-muted">Umur Proyek (n)</td><td class="py-2.5 font-mono">15 tahun</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════
+     TAB 6 — CONTROL LOGIC / DSS
+═══════════════════════════════════════ -->
+<div id="tab-dss" class="tab-panel">
+    <div class="dss-main-card bg-surface rounded-2xl border-2 border-border p-5 mb-5" id="dss-card">
+        <div class="flex items-start justify-between">
+            <div>
+                <span class="inline-block px-3 py-1 rounded-full text-xs font-bold font-mono mb-3 border" id="dss-badge"
+                      style="background:rgba(178,190,195,0.15);color:#b2bec3;border-color:#b2bec3;">
+                    MENUNGGU DATA
+                </span>
+                <p class="text-base font-semibold text-txt leading-relaxed" id="dss-pesan">Sistem sedang menginisiasi...</p>
+            </div>
+            <div class="text-right text-xs text-muted font-mono ml-4 shrink-0">Rule-Based EMS<br>Jurnal Model</div>
+        </div>
+    </div>
+    <div class="bg-surface rounded-2xl shadow-card p-4 mb-5">
+        <p class="text-xs font-bold text-muted uppercase tracking-widest mb-4">Decision Rules — Active Highlight</p>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div class="rule-card border border-border rounded-xl p-4" id="rule-charge">
+                <p class="text-xs text-muted mb-1">PV surplus (Pac &gt; Load) &amp; SoC &lt; 98%</p>
+                <p class="font-bold text-bess">→ CHARGING</p>
+            </div>
+            <div class="rule-card border border-border rounded-xl p-4" id="rule-full">
+                <p class="text-xs text-muted mb-1">PV surplus &amp; SoC ≥ 98%</p>
+                <p class="font-bold text-load">→ OPTIMUM</p>
+            </div>
+            <div class="rule-card border border-border rounded-xl p-4" id="rule-discharge">
+                <p class="text-xs text-muted mb-1">PV defisit (Pac &lt; Load) &amp; SoC &gt; 20%, BESS aktif</p>
+                <p class="font-bold" style="color:#fdcb6e">→ DISCHARGING</p>
+            </div>
+            <div class="rule-card border border-border rounded-xl p-4" id="rule-grid-support">
+                <p class="text-xs text-muted mb-1">PV defisit &amp; SoC &gt; 20%, BESS standby</p>
+                <p class="font-bold" style="color:#6c5ce7">→ GRID SUPPORT</p>
+            </div>
+            <div class="rule-card border border-border rounded-xl p-4 md:col-span-2" id="rule-grid-only">
+                <p class="text-xs text-muted mb-1">PV defisit &amp; SoC ≤ 20% — proteksi baterai aktif</p>
+                <p class="font-bold text-danger">→ GRID ONLY</p>
+            </div>
+        </div>
+    </div>
+    <div class="bg-surface rounded-2xl shadow-card p-4">
+        <p class="text-xs font-bold text-muted uppercase tracking-widest mb-4">Log Keputusan DSS (20 Terakhir)</p>
+        <div class="overflow-x-auto">
+            <table class="log-table w-full text-sm">
+                <thead>
+                    <tr class="border-b border-border">
+                        <th class="text-left py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Timestamp</th>
+                        <th class="text-left py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Status Operasi</th>
+                        <th class="text-left py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Keputusan</th>
+                    </tr>
+                </thead>
+                <tbody id="dss-log-body">
+                    <tr><td colspan="3" class="text-center py-6 text-muted text-sm">Memuat log...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════
+     TAB 7 — HISTORICAL ANALYSIS
+═══════════════════════════════════════ -->
+<div id="tab-history" class="tab-panel">
+    <div class="bg-surface rounded-2xl shadow-card p-5 mb-5">
+        <p class="text-xs font-bold text-muted uppercase tracking-widest mb-4">Filter Rentang Waktu</p>
+        <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;">
+            <div>
+                <p class="text-xs text-muted mb-1 font-semibold">Tanggal Mulai</p>
+                <input type="date" id="hist-start">
+            </div>
+            <div>
+                <p class="text-xs text-muted mb-1 font-semibold">Tanggal Selesai</p>
+                <input type="date" id="hist-end">
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                <button class="hist-btn-preset" onclick="histPreset(0)">Hari Ini</button>
+                <button class="hist-btn-preset" onclick="histPreset(7)">7 Hari</button>
+                <button class="hist-btn-preset" onclick="histPreset(30)">30 Hari</button>
+                <button onclick="fetchHistory()"
+                        style="background:linear-gradient(135deg,#6c5ce7,#a29bfe);color:white;border:none;
+                               padding:8px 20px;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;">
+                    Tampilkan Data
+                </button>
+                <button onclick="exportCsv()"
+                        style="background:linear-gradient(135deg,#00b894,#55efc4);color:white;border:none;
+                               padding:8px 20px;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;">
+                    ↓ Download CSV
+                </button>
+            </div>
+        </div>
+        <p class="text-xs text-muted mt-3 font-mono" id="hist-info">Pilih rentang tanggal lalu klik Tampilkan Data</p>
+    </div>
+
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5" id="hist-summary" style="display:none;">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-3">Energi Periode</p>
+            <div style="display:flex;flex-direction:column;gap:6px;">
+                <div>
+                    <p class="text-xs text-muted font-mono mb-0.5">PV Diproduksi</p>
+                    <p class="text-xl font-bold font-mono" style="color:#fdcb6e" id="hs-pv">0 kWh</p>
+                </div>
+                <div style="border-top:1px solid #f0f3f5;padding-top:6px;">
+                    <p class="text-xs text-muted font-mono mb-0.5">Konsumsi Beban</p>
+                    <p class="text-xl font-bold font-mono text-load" id="hs-load">0 kWh</p>
+                </div>
+            </div>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-2">Renewable Fraction</p>
+            <p class="text-3xl font-bold font-mono text-cyan" id="hs-rf">0%</p>
+            <p class="text-xs text-muted mt-2 font-mono">Rata-rata periode</p>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-3">Dampak Sistem</p>
+            <div style="display:flex;flex-direction:column;gap:6px;">
+                <div>
+                    <p class="text-xs text-muted font-mono mb-0.5">ESSA (Otonomi)</p>
+                    <p class="text-xl font-bold font-mono text-bess" id="hs-essa">0 jam</p>
+                </div>
+                <div style="border-top:1px solid #f0f3f5;padding-top:6px;">
+                    <p class="text-xs text-muted font-mono mb-0.5">CO₂ Tereduksi</p>
+                    <p class="text-xl font-bold font-mono text-cyan" id="hs-co2">0 kg</p>
+                </div>
+            </div>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest mb-2">RE Saving</p>
+            <p class="text-2xl font-bold font-mono text-bess" id="hs-saving">Rp 0</p>
+            <p class="text-xs text-muted mt-2 font-mono">Akumulasi periode</p>
+        </div>
+    </div>
+
+    <div class="bg-surface rounded-2xl shadow-card p-4 mb-4" id="hist-chart1-wrap" style="display:none;">
+        <div class="flex items-center justify-between mb-3">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest">Profil Energi (kWh)</p>
+            <button class="btn-reset-zoom" onclick="if(histChartPower)histChartPower.resetZoom()">↺ Reset</button>
+        </div>
+        <div style="height:220px;"><canvas id="hist-chart-power"></canvas></div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4" id="hist-chart23-wrap" style="display:none;">
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold text-bess uppercase tracking-widest">Tren SoC Baterai (%)</p>
+                <button class="btn-reset-zoom" onclick="if(histChartSoc)histChartSoc.resetZoom()">↺ Reset</button>
+            </div>
+            <div style="height:200px;"><canvas id="hist-chart-soc"></canvas></div>
+        </div>
+        <div class="bg-surface rounded-2xl shadow-card p-4">
+            <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-bold text-cyan uppercase tracking-widest">Tren Renewable Fraction (%)</p>
+                <button class="btn-reset-zoom" onclick="if(histChartRf)histChartRf.resetZoom()">↺ Reset</button>
+            </div>
+            <div style="height:200px;"><canvas id="hist-chart-rf"></canvas></div>
+        </div>
+    </div>
+
+    <div class="bg-surface rounded-2xl shadow-card p-4" id="hist-table-wrap" style="display:none;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <p class="text-xs font-bold text-muted uppercase tracking-widest">Log Data Historis (200 baris terbaru)</p>
+            <span class="text-xs text-muted font-mono" id="hist-row-count">0 baris</span>
+        </div>
+        <div style="overflow-x:auto;max-height:320px;overflow-y:auto;">
+            <table class="log-table w-full" style="font-size:11px;border-collapse:collapse;min-width:800px;">
+                <thead style="position:sticky;top:0;background:white;z-index:1;">
+                    <tr class="border-b border-border">
+                        <th class="text-left py-2 px-2 text-xs font-bold text-muted uppercase">Timestamp</th>
+                        <th class="text-right py-2 px-2 text-xs font-bold text-muted uppercase">PV DC (W)</th>
+                        <th class="text-right py-2 px-2 text-xs font-bold text-muted uppercase">Load (W)</th>
+                        <th class="text-right py-2 px-2 text-xs font-bold text-muted uppercase">P Inverter (W)</th>
+                        <th class="text-right py-2 px-2 text-xs font-bold text-muted uppercase">SoC (%)</th>
+                        <th class="text-right py-2 px-2 text-xs font-bold text-muted uppercase">RF (%)</th>
+                        <th class="text-left py-2 px-2 text-xs font-bold text-muted uppercase">DSS Status</th>
+                    </tr>
+                </thead>
+                <tbody id="hist-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div id="hist-empty" class="bg-surface rounded-2xl shadow-card p-10 text-center">
+        <i data-lucide="calendar-search" style="width:40px;height:40px;color:#b2bec3;margin:0 auto 12px;display:block;"></i>
+        <p class="text-muted text-sm">Pilih rentang tanggal dan klik <strong>Tampilkan Data</strong> untuk melihat analisis historis</p>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════
+     TAB 8 — VALIDITY & MICROSERVICE
+═══════════════════════════════════════ -->
+<div id="tab-validity" class="tab-panel">
+
+    <!-- Section 1: Microservice Status -->
+    <div class="bg-surface rounded-2xl shadow-card p-5 mb-5">
+        <div class="flex items-center justify-between mb-4">
+            <div>
+                <p class="text-xs font-bold text-muted uppercase tracking-widest">Status Microservice</p>
+                <p class="text-xs text-muted mt-1 font-mono">Docker container health · auto-refresh 30s</p>
+            </div>
+            <div class="flex items-center gap-2">
+                <div class="live-dot w-2 h-2 rounded-full bg-bess"></div>
+                <span class="text-xs font-mono font-bold text-bess" id="svc-last-update">—</span>
+            </div>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="w-full" style="font-size:12px;border-collapse:collapse;">
+                <thead>
+                    <tr class="border-b border-border">
+                        <th class="text-left py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Container</th>
+                        <th class="text-left py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Status</th>
+                        <th class="text-left py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Uptime</th>
+                        <th class="text-left py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Fungsi</th>
+                    </tr>
+                </thead>
+                <tbody id="svc-tbody">
+                    <tr><td colspan="4" class="text-center py-6 text-muted text-sm">Memuat data...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Section 2: Data Source Freshness -->
+    <div class="bg-surface rounded-2xl shadow-card p-5 mb-5">
+        <p class="text-xs font-bold text-muted uppercase tracking-widest mb-4">Informasi Data Berdasarkan Sumber</p>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4" id="validity-sources">
+            <!-- Diisi oleh JS -->
+        </div>
+    </div>
+
+    <!-- Section 3: Alert Validasi dari service_pemantauan -->
+    <div class="bg-surface rounded-2xl shadow-card p-5">
+        <div class="flex items-center justify-between mb-4">
+            <div>
+                <p class="text-xs font-bold text-muted uppercase tracking-widest">Validasi Data — service_pemantauan</p>
+                <p class="text-xs text-muted mt-1 font-mono">Alert aktif 1 jam terakhir · interval 60s</p>
+            </div>
+            <span id="validity-status-badge"
+                  style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700;"
+                  class="badge-offline">● —</span>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="w-full" style="font-size:12px;border-collapse:collapse;">
+                <thead>
+                    <tr class="border-b border-border">
+                        <th class="text-left py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Timestamp</th>
+                        <th class="text-left py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Parameter</th>
+                        <th class="text-right py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Nilai</th>
+                        <th class="text-left py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Jenis Alert</th>
+                        <th class="text-left py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Severity</th>
+                        <th class="text-left py-2 px-3 text-xs font-bold text-muted uppercase tracking-wider">Pesan</th>
+                    </tr>
+                </thead>
+                <tbody id="alert-tbody">
+                    <tr><td colspan="6" class="text-center py-6 text-muted text-sm">Memuat data...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div style="margin-top:12px;padding:8px 12px;background:rgba(108,92,231,0.06);border-radius:8px;border-left:3px solid #6c5ce7;">
+            <p class="text-xs font-mono text-muted">
+                Pengecekan otomatis: OUT_OF_RANGE · DATA_STALE · FROZEN · TIMESTAMP_ANOMALY
+            </p>
+        </div>
+    </div>
+</div>
+
+</main>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => { lucide.createIcons(); });
+</script>
+<script src="/static/js/main.js?v=3.7"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.png
+PVDNN.py
+aws_model.py
+aws_model2.py
+fixpac.py
+pv_hourly.py
+pvlib_dnn.py
+query.py
+time_pv.py

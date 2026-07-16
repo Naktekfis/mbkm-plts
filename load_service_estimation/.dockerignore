@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+delete.py
+time_load.py
+temp/
+model_bebanv2/training/

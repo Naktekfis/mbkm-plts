@@ -8,6 +8,8 @@ Entry point: `service_sensor/kirim.py`
 
 Fungsi `ambil_data_terkini()` membuka koneksi MySQL, mengambil record terbaru, memvalidasi umur dan selisih timestamp sumber, lalu mengembalikan satu dictionary telemetri. Snapshot yang sama menghasilkan `telemetry_id` yang sama. Data kosong, stale, terlalu jauh selisih waktunya, atau berada di masa depan tidak dipublikasikan.
 
+Orkestrasi query tetap berada di `ambil_data_terkini()`. Validasi timestamp sumber dipisahkan di `_validate_source_timestamps()`, sedangkan konversi nilai dan penyusunan kontrak payload berada di `_build_telemetry_payload()`.
+
 Perhitungan utama:
 
 - Daya semu grid: `ExtVtg * ExtCur` dalam VA.
@@ -22,6 +24,8 @@ Konvensi `p_inverter`: positif berarti baterai menyuplai panel, negatif berarti 
 Entry point: `service_logger/monitor.py`
 
 `setup_database()` membuat tabel, kolom migrasi, unique index `telemetry_id`, dan index timestamp secara idempoten. Logger memakai QoS 1 dan insert `ON CONFLICT DO NOTHING` untuk menahan duplikasi delivery MQTT.
+
+`setup_database()` mengelompokkan pembuatan tabel runtime, penyesuaian kolom, tabel estimasi/pemantauan, dan index; beberapa `ALTER` tetap berada bersama setup tabel runtime. `on_message()` menangani decoding JSON, siklus koneksi database, commit, dan penahanan error, lalu mendelegasikan pemetaan `INSERT` per topic ke helper telemetri, billing, control, atau monitoring.
 
 Kolom `timestamp` menyimpan `measured_at`, sedangkan `ingested_at` menyimpan waktu pesan diterima. Timestamp asli hybrid, PV, dan load juga disimpan terpisah.
 
@@ -39,6 +43,8 @@ Entry point: `service_billing/billing_engine.py`
 - Reduksi CO2 dengan faktor 0,87 kg/kWh.
 
 Akumulator tampilan disimpan dalam proses dan reset saat restart. Metrik interval tetap disimpan sehingga ringkasan HMI tidak ikut reset. Interval non-monoton atau lebih dari lima menit tidak diakumulasikan.
+
+Perhitungan tanpa I/O untuk metrik kumulatif, daya terbarukan, dan ESSA dipisahkan sebagai helper internal. `kalkulasi_ekonomi_mikrogrid()` tetap menjadi API perhitungan publik dan selalu mengembalikan tuple 12 nilai dalam urutan yang dikonsumsi `on_message()`.
 
 ## `service_control`
 
@@ -70,6 +76,8 @@ Setiap 60 detik service membaca 25 baris sensor terakhir dan menjalankan:
 
 SoC, tegangan DC, dan suhu DC dikecualikan dari frozen check. Nilai PV/hybrid nol pada malam hari juga dianggap normal.
 
+`run_validasi()` mengorkestrasi helper range, staleness, frozen, dan urutan timestamp. `load_latest_data()` menjadi batas akses database dan selalu membersihkan cursor serta koneksi setelah pembacaan.
+
 ## `service_hmi`
 
 Entry point backend: `service_hmi_flask/app.py`
@@ -97,11 +105,13 @@ API utama:
 
 HMI dijalankan oleh Gunicorn. Frontend melakukan polling data setiap 30 detik; status container tetap dipoll lewat endpoint terpisah.
 
+Handler route menjadi batas orkestrasi HTTP dan database. Untuk data real-time, pengambilan row dan pembentukan respons dipisahkan; untuk histori, `api_history()` mengambil rentang data lalu menyerahkan metrik interval, ringkasan, chart, dan baris tabel ke `history.py::summarize_history_rows()`.
+
 ## `service_watchdog`
 
 Entry point: `service_watchdog/watchdog.py`
 
-Setelah startup grace 180 detik, watchdog memeriksa freshness tabel setiap dua menit sebagai sinyal diagnostik. Data stale tidak memicu restart producer. HMI hanya di-restart jika `/health/ready` gagal, maksimal tiga kali dengan cooldown sepuluh menit.
+Setelah startup grace 180 detik, `run_checks()` memeriksa freshness tabel setiap dua menit sebagai sinyal diagnostik, lalu menyerahkan kebijakan pemulihan HMI ke `handle_hmi()`. Data stale tidak memicu restart producer. Hanya HMI yang di-restart jika `/health/ready` gagal, maksimal tiga kali dengan cooldown sepuluh menit.
 
 Mount Docker socket memberi akses administratif ke Docker host. Jalankan hanya pada host tepercaya.
 

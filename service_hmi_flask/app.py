@@ -1,4 +1,5 @@
 from flask import Flask, render_template, jsonify, request, Response
+from datetime import datetime, timedelta, timezone
 import psycopg2
 import psycopg2.extras
 import os
@@ -14,7 +15,7 @@ DB_CONFIG = {
     "password": os.environ.get("DB_PASS", "change-me"),
 }
 
-# ── Konstanta sistem ──────────────────────────────────────────
+# Konstanta sistem
 TARIF_PLN_PER_KWH = 955.00
 BESS_KAPASITAS_WH = 20_480.0
 FAKTOR_EMISI_CO2  = 0.87
@@ -43,119 +44,121 @@ def default_data():
     }
 
 
-# ─────────────────────────────────────────────
-# ENDPOINT: Data real-time terbaru
-# ─────────────────────────────────────────────
+def _fetch_realtime_data(cursor):
+    cursor.execute("""
+        SELECT telemetry_id,
+               COALESCE(grid_apparent_power_va, grid_pactive) AS grid_apparent_power_va,
+               grid_frequency,
+               grid_voltage, grid_current,
+               dc_meassoc, dc_voltage, dc_current,
+               bess_power_dc, dc_temperature,
+               p_inverter, ac_frequency,
+               a_ms_vol, a_ms_amp, b_ms_vol, b_ms_amp,
+               pac_inverter, load_watt, gridms_hz
+        FROM sensor_data
+        ORDER BY id DESC LIMIT 1
+    """)
+    row = cursor.fetchone()
+
+    cursor.execute("""
+        SELECT COALESCE(SUM(interval_saving_rp), 0) AS efisiensi_biaya_rp,
+               COALESCE(SUM(interval_renewable_kwh), 0) AS renewable_kwh,
+               COALESCE(SUM(interval_load_kwh), 0) AS load_kwh,
+               COALESCE(SUM(interval_co2_kg), 0) AS co2_kg,
+               COALESCE((SELECT lcoe_dinamis_rp FROM billing_data ORDER BY id DESC LIMIT 1), 0) AS lcoe_dinamis_rp,
+               COALESCE((SELECT essa_jam FROM billing_data ORDER BY id DESC LIMIT 1), 0) AS essa_jam
+        FROM billing_data
+        WHERE timestamp >= CURRENT_DATE
+    """)
+    billing = cursor.fetchone()
+
+    if row and row['telemetry_id']:
+        cursor.execute("""
+            SELECT status_operasi, keputusan_aktif
+            FROM control_data
+            WHERE telemetry_id = %s
+            ORDER BY id DESC LIMIT 1
+        """, (row['telemetry_id'],))
+    else:
+        cursor.execute("""
+            SELECT status_operasi, keputusan_aktif
+            FROM control_data
+            ORDER BY id DESC LIMIT 1
+        """)
+    control = cursor.fetchone()
+
+    cursor.execute("""
+        SELECT
+            (SELECT pac_estimasi FROM pv_estimasi
+             WHERE timestamp::date = CURRENT_DATE AND timestamp <= NOW()
+             ORDER BY timestamp DESC LIMIT 1) AS pac_estimasi,
+            (SELECT daya_estimasi FROM load_estimasi
+             WHERE timestamp::date = CURRENT_DATE AND timestamp <= NOW()
+             ORDER BY timestamp DESC LIMIT 1) AS daya_estimasi
+    """)
+    return row, billing, control, cursor.fetchone()
+
+
+def _build_realtime_data(row, billing, control, estimasi_row):
+    pv_a = (row['a_ms_vol'] or 0) * (row['a_ms_amp'] or 0)
+    pv_b = (row['b_ms_vol'] or 0) * (row['b_ms_amp'] or 0)
+    pac_w = row['pac_inverter'] or 0
+    p_inv = row['p_inverter'] or 0
+    bess_dc = row['bess_power_dc'] or 0
+    load_w = row['load_watt'] or 0
+
+    ebt_tersedia = pac_w + max(p_inv, 0)
+    ebt_terpakai = min(ebt_tersedia, load_w) if load_w > 0.5 else 0
+    ebt_terpakai = max(ebt_terpakai, 0)
+    rf_instan = round((ebt_terpakai / load_w) * 100, 2) if load_w > 0.5 else 0
+
+    soc_pct = row['dc_meassoc'] or 0
+    essa_rt = (BESS_KAPASITAS_WH * (soc_pct / 100.0)) / load_w if load_w > 0.5 else 0
+    return {
+        "grid_va":        row['grid_apparent_power_va'] or 0,
+        "freq_grid":      row['grid_frequency'] or 0,
+        "grid_voltage":   row['grid_voltage']   or 0,
+        "grid_current":   row['grid_current']   or 0,
+        "soc":            soc_pct,
+        "bess_power_dc":  round(bess_dc, 2),
+        "dc_voltage":     row['dc_voltage']     or 0,
+        "dc_current":     row['dc_current']     or 0,
+        "dc_temperature": row['dc_temperature'] or 0,
+        "freq_bess":      row['ac_frequency']   or 0,
+        "p_inverter":     round(p_inv, 2),
+        "pv_string_a":    round(pv_a, 2),
+        "pv_string_b":    round(pv_b, 2),
+        "pv":             round(pv_a + pv_b, 2),
+        "pac_inverter":   pac_w,
+        "pac_estimasi":   float(estimasi_row['pac_estimasi']) if estimasi_row and estimasi_row['pac_estimasi'] is not None else None,
+        "freq_pv":        row['gridms_hz']      or 0,
+        "load":           load_w,
+        "load_estimasi":  float(estimasi_row['daya_estimasi']) if estimasi_row and estimasi_row['daya_estimasi'] is not None else None,
+        "rf_instan":      rf_instan,
+        "efisiensi_rp":    billing['efisiensi_biaya_rp'] if billing else 0,
+        "rf_pct":          round((billing['renewable_kwh'] / billing['load_kwh']) * 100, 2) if billing and billing['load_kwh'] else 0,
+        "lcoe":            billing['lcoe_dinamis_rp']        if billing else 0,
+        "biaya_pln_murni": billing['load_kwh'] * TARIF_PLN_PER_KWH if billing else 0,
+        "biaya_aktual":    max((billing['load_kwh'] * TARIF_PLN_PER_KWH) - billing['efisiensi_biaya_rp'], 0) if billing else 0,
+        "essa_jam":        round(essa_rt, 2),
+        "co2_kg":          float(billing['co2_kg'] or 0)     if billing else 0,
+        "dss_status": control['status_operasi']  if control else "MENUNGGU DATA",
+        "dss_pesan":  control['keputusan_aktif'] if control else "Menganalisis sistem...",
+        "data_status": "OK",
+    }
+
+
 @app.route('/api/data')
 def api_data():
     try:
         conn   = get_db()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-        cursor.execute("""
-            SELECT telemetry_id,
-                   COALESCE(grid_apparent_power_va, grid_pactive) AS grid_apparent_power_va,
-                   grid_frequency,
-                   grid_voltage, grid_current,
-                   dc_meassoc, dc_voltage, dc_current,
-                   bess_power_dc, dc_temperature,
-                   p_inverter, ac_frequency,
-                   a_ms_vol, a_ms_amp, b_ms_vol, b_ms_amp,
-                   pac_inverter, load_watt, gridms_hz
-            FROM sensor_data
-            ORDER BY id DESC LIMIT 1
-        """)
-        row = cursor.fetchone()
-
-        cursor.execute("""
-            SELECT COALESCE(SUM(interval_saving_rp), 0) AS efisiensi_biaya_rp,
-                   COALESCE(SUM(interval_renewable_kwh), 0) AS renewable_kwh,
-                   COALESCE(SUM(interval_load_kwh), 0) AS load_kwh,
-                   COALESCE(SUM(interval_co2_kg), 0) AS co2_kg,
-                   COALESCE((SELECT lcoe_dinamis_rp FROM billing_data ORDER BY id DESC LIMIT 1), 0) AS lcoe_dinamis_rp,
-                   COALESCE((SELECT essa_jam FROM billing_data ORDER BY id DESC LIMIT 1), 0) AS essa_jam
-            FROM billing_data
-            WHERE timestamp >= CURRENT_DATE
-        """)
-        billing = cursor.fetchone()
-
-        if row and row['telemetry_id']:
-            cursor.execute("""
-                SELECT status_operasi, keputusan_aktif
-                FROM control_data
-                WHERE telemetry_id = %s
-                ORDER BY id DESC LIMIT 1
-            """, (row['telemetry_id'],))
-        else:
-            cursor.execute("""
-                SELECT status_operasi, keputusan_aktif
-                FROM control_data
-                ORDER BY id DESC LIMIT 1
-            """)
-        control = cursor.fetchone()
-
-        cursor.execute("""
-            SELECT
-                (SELECT pac_estimasi FROM pv_estimasi
-                 WHERE timestamp::date = CURRENT_DATE AND timestamp <= NOW()
-                 ORDER BY timestamp DESC LIMIT 1) AS pac_estimasi,
-                (SELECT daya_estimasi FROM load_estimasi
-                 WHERE timestamp::date = CURRENT_DATE AND timestamp <= NOW()
-                 ORDER BY timestamp DESC LIMIT 1) AS daya_estimasi
-        """)
-        estimasi_row = cursor.fetchone()
+        row, billing, control, estimasi_row = _fetch_realtime_data(cursor)
         conn.close()
 
         if row:
-            pv_a = (row['a_ms_vol'] or 0) * (row['a_ms_amp'] or 0)
-            pv_b = (row['b_ms_vol'] or 0) * (row['b_ms_amp'] or 0)
-
-            pac_w        = row['pac_inverter'] or 0
-            p_inv        = row['p_inverter']   or 0
-            bess_dc      = row['bess_power_dc'] or 0
-            load_w       = row['load_watt']    or 0
-
-            bess_discharge = max(p_inv, 0)
-            ebt_tersedia   = pac_w + bess_discharge
-            ebt_terpakai   = min(ebt_tersedia, load_w) if load_w > 0.5 else 0
-            ebt_terpakai   = max(ebt_terpakai, 0)
-            rf_instan      = round((ebt_terpakai / load_w) * 100, 2) if load_w > 0.5 else 0
-
-            soc_pct = row['dc_meassoc'] or 0
-            essa_rt = (BESS_KAPASITAS_WH * (soc_pct / 100.0)) / load_w if load_w > 0.5 else 0
-
-            return jsonify({
-                "grid_va":        row['grid_apparent_power_va'] or 0,
-                "freq_grid":      row['grid_frequency'] or 0,
-                "grid_voltage":   row['grid_voltage']   or 0,
-                "grid_current":   row['grid_current']   or 0,
-                "soc":            soc_pct,
-                "bess_power_dc":  round(bess_dc, 2),
-                "dc_voltage":     row['dc_voltage']     or 0,
-                "dc_current":     row['dc_current']     or 0,
-                "dc_temperature": row['dc_temperature'] or 0,
-                "freq_bess":      row['ac_frequency']   or 0,
-                "p_inverter":     round(p_inv, 2),
-                "pv_string_a":    round(pv_a, 2),
-                "pv_string_b":    round(pv_b, 2),
-                "pv":             round(pv_a + pv_b, 2),
-                "pac_inverter":   pac_w,
-                "pac_estimasi":   float(estimasi_row['pac_estimasi']) if estimasi_row and estimasi_row['pac_estimasi'] is not None else None,
-                "freq_pv":        row['gridms_hz']      or 0,
-                "load":           load_w,
-                "load_estimasi":  float(estimasi_row['daya_estimasi']) if estimasi_row and estimasi_row['daya_estimasi'] is not None else None,
-                "rf_instan":      rf_instan,
-                "efisiensi_rp":    billing['efisiensi_biaya_rp'] if billing else 0,
-                "rf_pct":          round((billing['renewable_kwh'] / billing['load_kwh']) * 100, 2) if billing and billing['load_kwh'] else 0,
-                "lcoe":            billing['lcoe_dinamis_rp']        if billing else 0,
-                "biaya_pln_murni": billing['load_kwh'] * TARIF_PLN_PER_KWH if billing else 0,
-                "biaya_aktual":    max((billing['load_kwh'] * TARIF_PLN_PER_KWH) - billing['efisiensi_biaya_rp'], 0) if billing else 0,
-                "essa_jam":        round(essa_rt, 2),
-                "co2_kg":          float(billing['co2_kg'] or 0)     if billing else 0,
-                "dss_status": control['status_operasi']  if control else "MENUNGGU DATA",
-                "dss_pesan":  control['keputusan_aktif'] if control else "Menganalisis sistem...",
-                "data_status": "OK",
-            })
+            return jsonify(_build_realtime_data(row, billing, control, estimasi_row))
 
         return jsonify(default_data())
 
@@ -177,9 +180,7 @@ def health_ready():
         return jsonify({"status": "not_ready", "error": str(e)}), 503
 
 
-# ─────────────────────────────────────────────
-# ENDPOINT: Historis sensor (60 titik terakhir)
-# ─────────────────────────────────────────────
+# Historis sensor (60 titik terakhir)
 @app.route('/api/sensor/history')
 def sensor_history():
     try:
@@ -204,9 +205,7 @@ def sensor_history():
         return jsonify([])
 
 
-# ─────────────────────────────────────────────
-# ENDPOINT: Historis keputusan DSS (20 terakhir)
-# ─────────────────────────────────────────────
+# Historis keputusan DSS (20 terakhir)
 @app.route('/api/control/history')
 def control_history():
     try:
@@ -226,9 +225,6 @@ def control_history():
         return jsonify([])
 
 
-# ─────────────────────────────────────────────
-# ROUTES
-# ─────────────────────────────────────────────
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -245,20 +241,21 @@ def api_control():
     }), 501
 
 
-# ─────────────────────────────────────────────
-# ENDPOINT: Historical Analysis
-# ─────────────────────────────────────────────
+def _history_bounds():
+    start_str = request.args.get('start', '')
+    end_str = request.args.get('end', '')
+    if not start_str or not end_str:
+        return None
+    return start_str, end_str, start_str + ' 00:00:00', end_str + ' 23:59:59'
+
+
 @app.route('/api/history')
 def api_history():
     try:
-        start_str = request.args.get('start', '')
-        end_str   = request.args.get('end',   '')
-
-        if not start_str or not end_str:
+        bounds = _history_bounds()
+        if bounds is None:
             return jsonify({"error": "Parameter start dan end wajib diisi"}), 400
-
-        start_dt = start_str + ' 00:00:00'
-        end_dt   = end_str   + ' 23:59:59'
+        _, _, start_dt, end_dt = bounds
 
         conn   = get_db()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -318,20 +315,14 @@ def api_history():
         return jsonify({"error": str(e)}), 500
 
 
-# ─────────────────────────────────────────────
-# ENDPOINT: Export CSV
-# ─────────────────────────────────────────────
 @app.route('/api/history/export')
 def export_history_csv():
     import csv, io
     try:
-        start_str = request.args.get('start', '')
-        end_str   = request.args.get('end',   '')
-        if not start_str or not end_str:
+        bounds = _history_bounds()
+        if bounds is None:
             return jsonify({"error": "Parameter start dan end wajib diisi"}), 400
-
-        start_dt = start_str + ' 00:00:00'
-        end_dt   = end_str   + ' 23:59:59'
+        start_str, end_str, start_dt, end_dt = bounds
 
         conn   = get_db()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -398,9 +389,7 @@ def export_history_csv():
         return jsonify({"error": str(e)}), 500
 
 
-# ─────────────────────────────────────────────
-# ENDPOINT: Status Microservice (Docker)
-# ─────────────────────────────────────────────
+# Status microservice Docker
 @app.route('/api/system/services')
 def api_system_services():
     try:
@@ -440,14 +429,44 @@ def api_system_services():
         return jsonify([]), 500
 
 
-# ─────────────────────────────────────────────
-# ENDPOINT: Validasi Data (dari service_pemantauan)
-# ─────────────────────────────────────────────
+def _staleness_seconds(timestamp, now=None):
+    if not timestamp:
+        return None
+    wib = timezone(timedelta(hours=7))
+    now = now or datetime.now(wib)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=wib)
+    else:
+        timestamp = timestamp.astimezone(wib)
+    return round((now - timestamp).total_seconds())
+
+
+def _status_label(seconds, warning_after=120, stale_after=300):
+    if seconds is None:
+        return 'NO DATA'
+    if seconds < -60:
+        return 'FUTURE'
+    if seconds < warning_after:
+        return 'FRESH'
+    if seconds < stale_after:
+        return 'WARNING'
+    return 'STALE'
+
+
+def _validity_source(name, timestamp, warning_after=120, stale_after=300):
+    return {
+        "name": name,
+        "timestamp": str(timestamp) if timestamp else '—',
+        "staleness_s": _staleness_seconds(timestamp),
+        "status": _status_label(
+            _staleness_seconds(timestamp), warning_after, stale_after
+        ),
+    }
+
+
 @app.route('/api/system/validity')
 def api_system_validity():
     try:
-        from datetime import datetime
-
         conn   = get_db()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -493,53 +512,17 @@ def api_system_validity():
 
         conn.close()
 
-        def staleness(ts_val):
-            if not ts_val:
-                return None
-            from datetime import timezone as _tz, timedelta as _td
-            WIB = _tz((_td(hours=7)))
-            now = datetime.now(WIB)
-            t = ts_val
-            if hasattr(t, 'tzinfo') and t.tzinfo is None:
-                t = t.replace(tzinfo=WIB)
-            else:
-                t = t.astimezone(WIB)
-            delta = (now - t).total_seconds()
-            return round(delta)
-
-        def status_label(secs, warning_after=120, stale_after=300):
-            if secs is None: return 'NO DATA'
-            if secs < -60: return 'FUTURE'
-            if secs < warning_after: return 'FRESH'
-            if secs < stale_after: return 'WARNING'
-            return 'STALE'
-
         ts_sensor   = last_sensor['timestamp']   if last_sensor   else None
         ts_pv_est   = last_pv_est['timestamp']   if last_pv_est   else None
         ts_load_est = last_load_est['timestamp'] if last_load_est else None
 
         sources = [
-            {
-                "name":        "Sensor (Sunny Boy + Island + Sielis)",
-                "timestamp":   str(ts_sensor)   if ts_sensor   else '—',
-                "staleness_s": staleness(ts_sensor),
-                "status":      status_label(staleness(ts_sensor)),
-            },
-            {
-                "name":        "Estimasi PV (PIML)",
-                "timestamp":   str(ts_pv_est)   if ts_pv_est   else '—',
-                "staleness_s": staleness(ts_pv_est),
-                "status":      status_label(staleness(ts_pv_est), 3900, 7200),
-            },
-            {
-                "name":        "Estimasi Load (DNN)",
-                "timestamp":   str(ts_load_est) if ts_load_est else '—',
-                "staleness_s": staleness(ts_load_est),
-                "status":      status_label(staleness(ts_load_est)),
-            },
+            _validity_source("Sensor (Sunny Boy + Island + Sielis)", ts_sensor),
+            _validity_source("Estimasi PV (PIML)", ts_pv_est, 3900, 7200),
+            _validity_source("Estimasi Load (DNN)", ts_load_est),
         ]
 
-        check_age = staleness(last_check['timestamp']) if last_check else None
+        check_age = _staleness_seconds(last_check['timestamp']) if last_check else None
         status_global = (
             last_check['status_global']
             if check_age is not None and 0 <= check_age <= 180

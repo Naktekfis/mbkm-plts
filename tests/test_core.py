@@ -90,8 +90,104 @@ class BillingTest(unittest.TestCase):
         self.assertEqual(repeated[6], accumulated[6])
         self.assertEqual(repeated[7:], (0.0,) * 5)
 
+    def test_reordered_timestamp_does_not_move_interval_anchor(self):
+        start = datetime(2026, 1, 1, 12, 0)
+        billing.kalkulasi_ekonomi_mikrogrid(1000, 1000, 0, 1000, 50, start)
+        billing.kalkulasi_ekonomi_mikrogrid(
+            1000, 1000, 0, 1000, 50, start - timedelta(seconds=30)
+        )
+        result = billing.kalkulasi_ekonomi_mikrogrid(
+            1000, 1000, 0, 1000, 50, start + timedelta(seconds=60)
+        )
+        self.assertAlmostEqual(result[11], 1 / 60)
+
+    def test_charging_is_excluded_and_discharging_is_renewable(self):
+        start = datetime(2026, 1, 1, 12, 0)
+        billing.kalkulasi_ekonomi_mikrogrid(500, 200, -800, 1000, 50, start)
+        charging = billing.kalkulasi_ekonomi_mikrogrid(
+            500, 200, -800, 1000, 50, start + timedelta(hours=1 / 60)
+        )
+        discharging = billing.kalkulasi_ekonomi_mikrogrid(
+            500, 200, 800, 1000, 50, start + timedelta(hours=2 / 60)
+        )
+        self.assertAlmostEqual(charging[8], 0.2 / 60)
+        self.assertAlmostEqual(discharging[8], 1 / 60)
+
+    def test_zero_load_uses_last_valid_load_for_essa(self):
+        start = datetime(2026, 1, 1, 12, 0)
+        billing.kalkulasi_ekonomi_mikrogrid(500, 500, 0, 1000, 50, start)
+        result = billing.kalkulasi_ekonomi_mikrogrid(
+            500, 500, 0, 0, 50, start + timedelta(seconds=60)
+        )
+        self.assertEqual(result[5], 10.24)
+        self.assertEqual(result[7:11], (0.0, 0.0, 0.0, 0.0))
+
+    def test_tuple_order_and_renewable_fraction_cap(self):
+        start = datetime(2026, 1, 1, 12, 0)
+        billing.kalkulasi_ekonomi_mikrogrid(2000, 2000, 1000, 1000, 50, start)
+        result = billing.kalkulasi_ekonomi_mikrogrid(
+            2000, 2000, 1000, 1000, 50, start + timedelta(seconds=60)
+        )
+        interval_kwh = 1 / 60
+        self.assertEqual(len(result), 12)
+        self.assertAlmostEqual(result[0], interval_kwh * billing.TARIF_PLN_PER_KWH)
+        self.assertEqual(result[1], 100.0)
+        self.assertAlmostEqual(result[3], interval_kwh * billing.TARIF_PLN_PER_KWH)
+        self.assertEqual(result[4], 0.0)
+        self.assertAlmostEqual(result[6], interval_kwh * billing.FAKTOR_EMISI_CO2)
+        self.assertAlmostEqual(result[7], interval_kwh)
+        self.assertAlmostEqual(result[8], interval_kwh)
+        self.assertAlmostEqual(result[9], interval_kwh * billing.TARIF_PLN_PER_KWH)
+        self.assertAlmostEqual(result[10], interval_kwh * billing.FAKTOR_EMISI_CO2)
+        self.assertAlmostEqual(result[11], 1 / 60)
+
+    def test_renewable_fraction_is_capped_for_existing_state(self):
+        start = datetime(2026, 1, 1, 12, 0)
+        billing.kalkulasi_ekonomi_mikrogrid(0, 0, 0, 1000, 50, start)
+        billing.akumulasi_beban_kwh = 0.001
+        billing.akumulasi_ebt_kwh = 0.002
+        billing.total_efisiensi_biaya_rp = 0.002 * billing.TARIF_PLN_PER_KWH
+        result = billing.kalkulasi_ekonomi_mikrogrid(
+            0, 1000, 0, 1000, 50, start + timedelta(seconds=60)
+        )
+        self.assertEqual(result[1], 100.0)
+
 
 class HistorySummaryTest(unittest.TestCase):
+    @staticmethod
+    def row(index=0, **overrides):
+        row = {
+            "timestamp": datetime(2026, 1, 1) + timedelta(minutes=index),
+            "interval_hours": 1 / 60,
+            "pv_dc": 1000,
+            "pac_inverter": 500,
+            "p_inverter": 0,
+            "load_w": 1000,
+            "soc": 50,
+            "dss_status": "OPTIMUM",
+        }
+        row.update(overrides)
+        return row
+
+    def test_empty_rows_are_rejected_before_summary(self):
+        with self.assertRaises(IndexError):
+            summarize_history_rows([], 955, 0.87, 20480)
+
+    def test_charging_power_is_not_counted_as_renewable(self):
+        summary, _, table = summarize_history_rows(
+            [self.row(p_inverter=-1000)], 955, 0.87, 20480
+        )
+        self.assertEqual(summary["avg_rf_pct"], 50.0)
+        self.assertEqual(table[0]["rf_pct"], 50.0)
+
+    def test_table_is_limited_to_last_200_rows(self):
+        rows = [self.row(index) for index in range(201)]
+        summary, charts, table = summarize_history_rows(rows, 955, 0.87, 20480)
+        self.assertEqual(summary["total_rows"], 201)
+        self.assertEqual(len(charts["labels"]), 201)
+        self.assertEqual(len(table), 200)
+        self.assertEqual(table[0]["timestamp"], "2026-01-01 00:01:00")
+
     def test_summary_uses_actual_interval(self):
         rows = [
             {

@@ -3,9 +3,7 @@ import logging
 import paho.mqtt.client as mqtt
 import os
 
-# ==========================================
-# 1. KONFIGURASI
-# ==========================================
+# Konfigurasi
 MQTT_BROKER     = os.environ.get("MQTT_BROKER", "mqtt_broker")
 MQTT_PORT       = int(os.environ.get("MQTT_PORT", 1883))
 TOPIC_TELEMETRY = "microgrid/telemetry"
@@ -14,9 +12,7 @@ TOPIC_CONTROL   = "microgrid/control"
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 
-# ==========================================
-# 2. RULE-BASED EMS (DSS)
-# ==========================================
+# Rule-based EMS (DSS)
 def evaluate_ems_rules(pac_inverter_w, load_watt_w, soc, p_inverter_w):
     """
     Parameter:
@@ -76,9 +72,7 @@ def evaluate_ems_rules(pac_inverter_w, load_watt_w, soc, p_inverter_w):
     }
 
 
-# ==========================================
-# 3. MQTT CALLBACK
-# ==========================================
+# MQTT callback
 def on_connect(client, userdata, flags, rc):
     logging.info("Service Control (DSS Rule-Based) terhubung ke MQTT Broker.")
     client.subscribe(TOPIC_TELEMETRY, qos=1)
@@ -105,9 +99,7 @@ def on_message(client, userdata, msg):
         logging.error(f"Error Control Engine: {e}")
 
 
-# ==========================================
-# 4. ENTRY POINT
-# ==========================================
+# Entry point
 if __name__ == "__main__":
     client = mqtt.Client(client_id="dss_control_engine")
     client.on_connect = on_connect

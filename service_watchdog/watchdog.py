@@ -6,9 +6,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 
-# ==========================================
 # KONFIGURASI
-# ==========================================
 CHECK_INTERVAL  = 120   # cek setiap 2 menit
 MAX_DATA_AGE    = 180   # data dianggap stale jika > 3 menit
 STARTUP_GRACE   = int(os.environ.get("STARTUP_GRACE_SECONDS", 180))
@@ -33,9 +31,7 @@ SERVICE_TABLE_MAP = {
     "service_control": "control_data",
 }
 
-# ==========================================
 # LOGGING
-# ==========================================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [WATCHDOG] %(levelname)s - %(message)s'
@@ -43,9 +39,7 @@ logging.basicConfig(
 log = logging.getLogger("watchdog")
 
 
-# ==========================================
 # CEK FRESHNESS DATA DI POSTGRESQL
-# ==========================================
 def cek_data_freshness(table_name):
     """
     Cek apakah tabel memiliki data terbaru dalam MAX_DATA_AGE detik.
@@ -81,9 +75,7 @@ def cek_data_freshness(table_name):
         return False
 
 
-# ==========================================
 # CEK HMI HTTP
-# ==========================================
 def cek_hmi():
     """
     Cek apakah HMI merespons HTTP 200.
@@ -97,9 +89,7 @@ def cek_hmi():
         return False
 
 
-# ==========================================
 # RESTART CONTAINER
-# ==========================================
 def restart_container(client, container_name):
     """
     Restart container menggunakan Docker SDK.
@@ -118,9 +108,36 @@ def restart_container(client, container_name):
         return False
 
 
-# ==========================================
-# MAIN LOOP
-# ==========================================
+def handle_hmi(docker_client, restart_count, last_restart):
+    hmi_ok = cek_hmi()
+    if not hmi_ok:
+        name = "service_hmi_flask"
+        elapsed = time.time() - last_restart.get(name, 0)
+        count = restart_count.get(name, 0)
+        if count < MAX_RESTARTS and elapsed >= RESTART_COOLDOWN:
+            log.warning(f"[{name}] Readiness gagal; restart {count + 1}/{MAX_RESTARTS}.")
+            if restart_container(docker_client, name):
+                restart_count[name] = count + 1
+                last_restart[name] = time.time()
+        else:
+            log.error(f"[{name}] Readiness gagal; restart ditahan oleh cooldown/budget.")
+    else:
+        log.info("[service_hmi_flask] OK — HMI merespons.")
+        restart_count["service_hmi_flask"] = 0
+
+
+def run_checks(docker_client, restart_count, last_restart):
+    # Freshness adalah sinyal kualitas data, bukan bukti proses gagal.
+    for container_name, table_name in SERVICE_TABLE_MAP.items():
+        is_fresh = cek_data_freshness(table_name)
+        if not is_fresh:
+            log.warning(f"[{container_name}] Data stale di {table_name}; periksa sumber, broker, dan logger.")
+        else:
+            log.info(f"[{container_name}] OK — data {table_name} fresh.")
+
+    handle_hmi(docker_client, restart_count, last_restart)
+
+
 def main():
     log.info("=" * 50)
     log.info("Service Watchdog dimulai.")
@@ -143,31 +160,7 @@ def main():
 
     while True:
         log.info("--- Mulai pengecekan ---")
-
-        # 1. Freshness adalah sinyal kualitas data, bukan bukti proses gagal.
-        for container_name, table_name in SERVICE_TABLE_MAP.items():
-            is_fresh = cek_data_freshness(table_name)
-            if not is_fresh:
-                log.warning(f"[{container_name}] Data stale di {table_name}; periksa sumber, broker, dan logger.")
-            else:
-                log.info(f"[{container_name}] OK — data {table_name} fresh.")
-
-        # 2. Cek HMI
-        hmi_ok = cek_hmi()
-        if not hmi_ok:
-            name = "service_hmi_flask"
-            elapsed = time.time() - last_restart.get(name, 0)
-            count = restart_count.get(name, 0)
-            if count < MAX_RESTARTS and elapsed >= RESTART_COOLDOWN:
-                log.warning(f"[{name}] Readiness gagal; restart {count + 1}/{MAX_RESTARTS}.")
-                if restart_container(docker_client, name):
-                    restart_count[name] = count + 1
-                    last_restart[name] = time.time()
-            else:
-                log.error(f"[{name}] Readiness gagal; restart ditahan oleh cooldown/budget.")
-        else:
-            log.info("[service_hmi_flask] OK — HMI merespons.")
-            restart_count["service_hmi_flask"] = 0
+        run_checks(docker_client, restart_count, last_restart)
 
         log.info(f"--- Selesai. Tidur {CHECK_INTERVAL}s ---")
         time.sleep(CHECK_INTERVAL)

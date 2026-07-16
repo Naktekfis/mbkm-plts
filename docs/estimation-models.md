@@ -25,6 +25,8 @@ Alurnya:
 6. Output diambil menjadi 24 titik per jam untuk hari ini.
 7. `main.run()` memvalidasi 24 output lalu melakukan satu batch upsert ke `pv_estimasi`.
 
+Tahap interpolasi cuaca, pembentukan fitur waktu, prediksi DNI, simulasi `pvlib`, koreksi DNN, dan pembentukan output per jam dipisahkan sebagai helper internal agar kontrak numeriknya dapat diuji tanpa memuat model TensorFlow.
+
 Model dan parameter fisik berada langsung di repo. Lokasi simulasi adalah sekitar Bandung (`-6.89`, `107.61`, 770 m), panel menghadap timur dengan tilt 2 derajat, 16 modul per string, dan 2 string.
 
 ## Estimasi load
@@ -48,7 +50,11 @@ Alurnya:
 5. Model dipilih berdasarkan nama hari ini, misalnya `modelbeban_Monday`.
 6. Prediksi 1.440 menit dari 00:00 sampai 23:59 divalidasi lalu di-upsert dalam satu batch.
 
+Penyiapan input per menit, perhitungan daya, moving average, penyusunan fitur, prediksi, dan pembentukan output dipisahkan sebagai helper internal agar preprocessing dapat diuji tanpa memuat SavedModel TensorFlow.
+
 Folder `model_bebanv2/training/` berisi CSV training per hari. Runtime tidak melakukan training ulang.
+
+Uji unit helper estimator memakai fake dan mock terkontrol. Hasilnya tidak membuktikan kompatibilitas runtime dengan SavedModel TensorFlow atau instalasi `pvlib` yang sebenarnya.
 
 ## Jadwal
 

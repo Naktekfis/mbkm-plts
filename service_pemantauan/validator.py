@@ -6,9 +6,7 @@ import paho.mqtt.client as mqtt
 import os
 from datetime import datetime, timezone, timedelta
 
-# ==========================================
 # 1. KONFIGURASI
-# ==========================================
 POSTGRES_HOST = os.environ.get("DB_HOST", "postgres")
 POSTGRES_PORT = int(os.environ.get("DB_PORT", 5432))
 POSTGRES_DB   = os.environ.get("DB_NAME", "microgrid_db")
@@ -25,9 +23,7 @@ STALE_THRESHOLD  = 120   # detik maksimum sejak data terakhir
 
 WIB = timezone(timedelta(hours=7))
 
-# ==========================================
 # 2. PARAMETER RANGE VALIDASI (C1)
-# ==========================================
 RANGE = {
     "pac_inverter":   {"min": 0,      "max": 5000},
     "grid_voltage":   {"min": 180,    "max": 280},
@@ -43,9 +39,7 @@ RANGE = {
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# ==========================================
 # 3. KONEKSI POSTGRESQL
-# ==========================================
 def get_db():
     return psycopg2.connect(
         host=POSTGRES_HOST,
@@ -56,35 +50,36 @@ def get_db():
         connect_timeout=5,
     )
 
-# ==========================================
 # 4. AMBIL DATA TERBARU
-# ==========================================
 def load_latest_data(n=25):
     """Ambil n baris terakhir dari sensor_data."""
     try:
         conn = get_db()
-        cur  = conn.cursor()
-        cur.execute(f"""
-            SELECT timestamp, pac_inverter, grid_voltage, grid_current,
-                   COALESCE(grid_apparent_power_va, grid_pactive) AS grid_apparent_power_va,
-                   dc_voltage, dc_current, dc_meassoc,
-                   dc_temperature, load_watt, p_inverter
-            FROM sensor_data
-            ORDER BY timestamp DESC
-            LIMIT {n}
-        """)
-        cols = [desc[0] for desc in cur.description]
-        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
-        conn.close()
-        # rows[0] = terbaru, rows[-1] = terlama
-        return rows
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute(f"""
+                    SELECT timestamp, pac_inverter, grid_voltage, grid_current,
+                           COALESCE(grid_apparent_power_va, grid_pactive) AS grid_apparent_power_va,
+                           dc_voltage, dc_current, dc_meassoc,
+                           dc_temperature, load_watt, p_inverter
+                    FROM sensor_data
+                    ORDER BY timestamp DESC
+                    LIMIT {n}
+                """)
+                cols = [desc[0] for desc in cur.description]
+                rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+                # rows[0] = terbaru, rows[-1] = terlama
+                return rows
+            finally:
+                cur.close()
+        finally:
+            conn.close()
     except Exception as e:
         logging.error(f"DB error: {e}")
         return []
 
-# ==========================================
 # 5. VALIDASI C1 — RANGE
-# ==========================================
 def validate_range(row):
     alerts = []
     for param, batas in RANGE.items():
@@ -104,9 +99,7 @@ def validate_range(row):
             })
     return alerts
 
-# ==========================================
 # 6. VALIDASI C2 — STALENESS
-# ==========================================
 def validate_staleness(rows):
     if not rows:
         return [{
@@ -142,9 +135,7 @@ def validate_staleness(rows):
         }]
     return []
 
-# ==========================================
 # 7. VALIDASI C3 — FROZEN DATA
-# ==========================================
 def is_daytime():
     jam = datetime.now(WIB).hour
     return 6 <= jam < 18
@@ -172,9 +163,7 @@ def validate_frozen(rows, param):
         }]
     return []
 
-# ==========================================
 # 8. VALIDASI C5 — URUTAN TIMESTAMP
-# ==========================================
 def validate_timestamp_order(rows):
     alerts = []
     for i in range(len(rows) - 1):
@@ -194,9 +183,7 @@ def validate_timestamp_order(rows):
             break  # cukup laporkan satu kejadian
     return alerts
 
-# ==========================================
 # 9. JALANKAN SEMUA VALIDASI
-# ==========================================
 def run_validasi():
     rows = load_latest_data(n=25)
     semua_alerts = []
@@ -237,9 +224,7 @@ def run_validasi():
 
     return payload
 
-# ==========================================
 # 10. MQTT
-# ==========================================
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
         logging.info("Terhubung ke MQTT Broker.")

@@ -7,9 +7,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ==========================================
-# KONFIGURASI
-# ==========================================
 MQTT_BROKER = os.environ.get("MQTT_BROKER", "mqtt_broker")
 MQTT_PORT   = int(os.environ.get("MQTT_PORT", 1883))
 
@@ -23,12 +20,7 @@ DB_CONFIG = {
 }
 
 
-# ==========================================
-# SETUP DATABASE
-# ==========================================
-def setup_database():
-    conn   = psycopg2.connect(**DB_CONFIG)
-    cursor = conn.cursor()
+def _create_runtime_tables(cursor):
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS sensor_data (
             id             SERIAL PRIMARY KEY,
@@ -90,6 +82,9 @@ def setup_database():
             daya_pln_dihitung_watt FLOAT
         )
     ''')
+
+
+def _migrate_runtime_tables(cursor):
     new_columns = [
         ("telemetry_id", "UUID"),
         ("ingested_at", "TIMESTAMP"),
@@ -124,6 +119,9 @@ def setup_database():
             f"ALTER TABLE billing_data ADD COLUMN IF NOT EXISTS {col} {col_type}"
         )
     cursor.execute("ALTER TABLE control_data ADD COLUMN IF NOT EXISTS telemetry_id UUID")
+
+
+def _create_estimation_and_monitoring_tables(cursor):
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS monitoring_alerts (
             id           SERIAL PRIMARY KEY,
@@ -155,6 +153,9 @@ def setup_database():
             daya_estimasi   FLOAT
         )
     ''')
+
+
+def _create_indexes(cursor):
     for table in ("sensor_data", "billing_data", "control_data", "monitoring_alerts", "monitoring_runs"):
         cursor.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{table}_timestamp ON {table} (timestamp DESC)"
@@ -171,20 +172,146 @@ def setup_database():
         CREATE UNIQUE INDEX IF NOT EXISTS idx_control_telemetry_id
         ON control_data (telemetry_id) WHERE telemetry_id IS NOT NULL
     ''')
+
+
+def setup_database():
+    conn   = psycopg2.connect(**DB_CONFIG)
+    cursor = conn.cursor()
+    _create_runtime_tables(cursor)
+    _migrate_runtime_tables(cursor)
+    _create_estimation_and_monitoring_tables(cursor)
+    _create_indexes(cursor)
     conn.commit()
     conn.close()
     print("Database PostgreSQL siap digunakan.")
 
 
-# ==========================================
-# MQTT CALLBACK
-# ==========================================
 def on_connect(client, userdata, flags, rc):
     print("Logger terhubung ke MQTT Broker.")
     client.subscribe("microgrid/telemetry", qos=1)
     client.subscribe("microgrid/billing", qos=1)
     client.subscribe("microgrid/control", qos=1)
     client.subscribe("microgrid/monitoring")
+
+
+def _insert_telemetry(cursor, payload, waktu_sekarang):
+    cursor.execute('''
+        INSERT INTO sensor_data (
+            telemetry_id, timestamp, ingested_at,
+            source_timestamp_hybrid, source_timestamp_pv, source_timestamp_load,
+            grid_apparent_power_va, grid_frequency,
+            grid_voltage, grid_current,
+            dc_meassoc, dc_voltage, dc_current,
+            bess_power_dc, dc_temperature,
+            p_inverter, ac_frequency,
+            a_ms_vol, a_ms_amp,
+            b_ms_vol, b_ms_amp,
+            pac_inverter, load_watt, gridms_hz
+        ) VALUES (
+            %s,%s,%s,%s,%s,%s,
+            %s,%s,
+            %s,%s,%s,%s,%s,
+            %s,%s,%s,%s,
+            %s,%s,%s,%s,
+            %s,%s,%s
+        ) ON CONFLICT DO NOTHING
+    ''', (
+        payload.get("telemetry_id"),
+        payload.get("measured_at"),
+        waktu_sekarang,
+        payload.get("source_timestamp_hybrid"),
+        payload.get("source_timestamp_pv"),
+        payload.get("source_timestamp_load"),
+        payload.get("grid_apparent_power_va"),
+        payload.get("grid_frequency"),
+        payload.get("grid_voltage"),
+        payload.get("grid_current"),
+        payload.get("dc_meassoc"),
+        payload.get("dc_voltage"),
+        payload.get("dc_current"),
+        payload.get("bess_power_dc"),
+        payload.get("dc_temperature"),
+        payload.get("p_inverter"),
+        payload.get("ac_frequency"),
+        payload.get("A.Ms.Vol"),
+        payload.get("A.Ms.Amp"),
+        payload.get("B.Ms.Vol"),
+        payload.get("B.Ms.Amp"),
+        payload.get("pac_inverter"),
+        payload.get("load_watt"),
+        payload.get("GridMs.Hz"),
+    ))
+
+
+def _insert_billing(cursor, payload, waktu_sekarang):
+    cursor.execute('''
+        INSERT INTO billing_data (
+            telemetry_id, timestamp, efisiensi_biaya_rp, renewable_fraction_pct,
+            lcoe_dinamis_rp, biaya_pln_murni_rp, biaya_aktual_rp,
+            essa_jam, co2_kg, interval_load_kwh,
+            interval_renewable_kwh, interval_saving_rp, interval_co2_kg,
+            interval_hours
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT DO NOTHING
+    ''', (
+        payload.get("telemetry_id"),
+        payload.get("measured_at", waktu_sekarang),
+        payload.get("efisiensi_biaya_rp",     0.0),
+        payload.get("renewable_fraction_pct", 0.0),
+        payload.get("lcoe_dinamis_rp",        0.0),
+        payload.get("biaya_pln_murni_rp",     0.0),
+        payload.get("biaya_aktual_rp",        0.0),
+        payload.get("essa_jam",               0.0),
+        payload.get("co2_kg",                 0.0),
+        payload.get("interval_load_kwh",      0.0),
+        payload.get("interval_renewable_kwh", 0.0),
+        payload.get("interval_saving_rp",     0.0),
+        payload.get("interval_co2_kg",        0.0),
+        payload.get("interval_hours",         0.0),
+    ))
+
+
+def _insert_control(cursor, payload, waktu_sekarang):
+    cursor.execute('''
+        INSERT INTO control_data (
+            telemetry_id, timestamp, status_operasi,
+            keputusan_aktif, daya_pln_dihitung_watt
+        ) VALUES (%s,%s,%s,%s,%s)
+        ON CONFLICT DO NOTHING
+    ''', (
+        payload.get("telemetry_id"),
+        payload.get("measured_at", waktu_sekarang),
+        payload.get("status_operasi",         ""),
+        payload.get("keputusan_aktif",        ""),
+        payload.get("daya_pln_dihitung_watt", 0.0),
+    ))
+
+
+def _insert_monitoring(cursor, payload, waktu_sekarang):
+    cursor.execute('''
+        INSERT INTO monitoring_runs (
+            timestamp, status_global, jumlah_alert
+        ) VALUES (%s, %s, %s)
+    ''', (
+        waktu_sekarang,
+        payload.get("status_global", "UNKNOWN"),
+        payload.get("jumlah_alert", 0),
+    ))
+    for alert in payload.get("alerts", []):
+        cursor.execute('''
+            INSERT INTO monitoring_alerts (
+                timestamp, parameter, nilai_aktual,
+                jenis_alert, severity, pesan
+            ) VALUES (%s, %s, %s, %s, %s, %s)
+        ''', (
+            waktu_sekarang,
+            alert.get("parameter"),
+            alert.get("nilai_aktual"),
+            alert.get("jenis_alert"),
+            alert.get("severity"),
+            alert.get("pesan"),
+        ))
+
 
 def on_message(client, userdata, msg):
     topic = msg.topic
@@ -195,116 +322,13 @@ def on_message(client, userdata, msg):
         conn   = psycopg2.connect(**DB_CONFIG)
         cursor = conn.cursor()
         if topic == "microgrid/telemetry":
-            cursor.execute('''
-                INSERT INTO sensor_data (
-                    telemetry_id, timestamp, ingested_at,
-                    source_timestamp_hybrid, source_timestamp_pv, source_timestamp_load,
-                    grid_apparent_power_va, grid_frequency,
-                    grid_voltage, grid_current,
-                    dc_meassoc, dc_voltage, dc_current,
-                    bess_power_dc, dc_temperature,
-                    p_inverter, ac_frequency,
-                    a_ms_vol, a_ms_amp,
-                    b_ms_vol, b_ms_amp,
-                    pac_inverter, load_watt, gridms_hz
-                ) VALUES (
-                    %s,%s,%s,%s,%s,%s,
-                    %s,%s,
-                    %s,%s,%s,%s,%s,
-                    %s,%s,%s,%s,
-                    %s,%s,%s,%s,
-                    %s,%s,%s
-                ) ON CONFLICT DO NOTHING
-            ''', (
-                payload.get("telemetry_id"),
-                payload.get("measured_at"),
-                waktu_sekarang,
-                payload.get("source_timestamp_hybrid"),
-                payload.get("source_timestamp_pv"),
-                payload.get("source_timestamp_load"),
-                payload.get("grid_apparent_power_va"),
-                payload.get("grid_frequency"),
-                payload.get("grid_voltage"),
-                payload.get("grid_current"),
-                payload.get("dc_meassoc"),
-                payload.get("dc_voltage"),
-                payload.get("dc_current"),
-                payload.get("bess_power_dc"),
-                payload.get("dc_temperature"),
-                payload.get("p_inverter"),
-                payload.get("ac_frequency"),
-                payload.get("A.Ms.Vol"),
-                payload.get("A.Ms.Amp"),
-                payload.get("B.Ms.Vol"),
-                payload.get("B.Ms.Amp"),
-                payload.get("pac_inverter"),
-                payload.get("load_watt"),
-                payload.get("GridMs.Hz"),
-            ))
+            _insert_telemetry(cursor, payload, waktu_sekarang)
         elif topic == "microgrid/billing":
-            cursor.execute('''
-                INSERT INTO billing_data (
-                    telemetry_id, timestamp, efisiensi_biaya_rp, renewable_fraction_pct,
-                    lcoe_dinamis_rp, biaya_pln_murni_rp, biaya_aktual_rp,
-                    essa_jam, co2_kg, interval_load_kwh,
-                    interval_renewable_kwh, interval_saving_rp, interval_co2_kg,
-                    interval_hours
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT DO NOTHING
-            ''', (
-                payload.get("telemetry_id"),
-                payload.get("measured_at", waktu_sekarang),
-                payload.get("efisiensi_biaya_rp",     0.0),
-                payload.get("renewable_fraction_pct", 0.0),
-                payload.get("lcoe_dinamis_rp",        0.0),
-                payload.get("biaya_pln_murni_rp",     0.0),
-                payload.get("biaya_aktual_rp",        0.0),
-                payload.get("essa_jam",               0.0),
-                payload.get("co2_kg",                 0.0),
-                payload.get("interval_load_kwh",      0.0),
-                payload.get("interval_renewable_kwh", 0.0),
-                payload.get("interval_saving_rp",     0.0),
-                payload.get("interval_co2_kg",        0.0),
-                payload.get("interval_hours",         0.0),
-            ))
+            _insert_billing(cursor, payload, waktu_sekarang)
         elif topic == "microgrid/control":
-            cursor.execute('''
-                INSERT INTO control_data (
-                    telemetry_id, timestamp, status_operasi,
-                    keputusan_aktif, daya_pln_dihitung_watt
-                ) VALUES (%s,%s,%s,%s,%s)
-                ON CONFLICT DO NOTHING
-            ''', (
-                payload.get("telemetry_id"),
-                payload.get("measured_at", waktu_sekarang),
-                payload.get("status_operasi",         ""),
-                payload.get("keputusan_aktif",        ""),
-                payload.get("daya_pln_dihitung_watt", 0.0),
-            ))
+            _insert_control(cursor, payload, waktu_sekarang)
         elif topic == "microgrid/monitoring":
-            cursor.execute('''
-                INSERT INTO monitoring_runs (
-                    timestamp, status_global, jumlah_alert
-                ) VALUES (%s, %s, %s)
-            ''', (
-                waktu_sekarang,
-                payload.get("status_global", "UNKNOWN"),
-                payload.get("jumlah_alert", 0),
-            ))
-            for alert in payload.get("alerts", []):
-                cursor.execute('''
-                    INSERT INTO monitoring_alerts (
-                        timestamp, parameter, nilai_aktual,
-                        jenis_alert, severity, pesan
-                    ) VALUES (%s, %s, %s, %s, %s, %s)
-                ''', (
-                    waktu_sekarang,
-                    alert.get("parameter"),
-                    alert.get("nilai_aktual"),
-                    alert.get("jenis_alert"),
-                    alert.get("severity"),
-                    alert.get("pesan"),
-                ))
+            _insert_monitoring(cursor, payload, waktu_sekarang)
         conn.commit()
     except Exception as e:
         print(f"Gagal merekam data dari {topic}: {e}")
@@ -313,9 +337,6 @@ def on_message(client, userdata, msg):
             conn.close()
 
 
-# ==========================================
-# ENTRY POINT
-# ==========================================
 if __name__ == "__main__":
     setup_database()
     mqtt_client = mqtt.Client(client_id="data_logger_db")

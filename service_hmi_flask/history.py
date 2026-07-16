@@ -1,12 +1,10 @@
 from collections import defaultdict
 
 
-def summarize_history_rows(rows, tariff_per_kwh, emission_factor, bess_capacity_wh):
-    rows = [dict(row) for row in rows]
+def _add_interval_metrics(rows, tariff_per_kwh, emission_factor):
     total_pv_kwh = 0.0
     total_load_kwh = 0.0
     total_renewable_kwh = 0.0
-
     for row in rows:
         interval_hours = float(row.get("interval_hours") or 0)
         pv_dc = float(row.get("pv_dc") or 0)
@@ -22,7 +20,11 @@ def summarize_history_rows(rows, tariff_per_kwh, emission_factor, bess_capacity_
         row["rf_pct"] = round((renewable_w / load_w) * 100, 2) if load_w > 0.5 else 0
         row["re_saving"] = round(interval_renewable_kwh * tariff_per_kwh, 2)
         row["co2_kg"] = round(interval_renewable_kwh * emission_factor, 4)
+    return total_pv_kwh, total_load_kwh, total_renewable_kwh
 
+
+def _build_summary(rows, totals, tariff_per_kwh, emission_factor, bess_capacity_wh):
+    total_pv_kwh, total_load_kwh, total_renewable_kwh = totals
     total_re_saving = total_renewable_kwh * tariff_per_kwh
     avg_rf = (total_renewable_kwh / total_load_kwh) * 100 if total_load_kwh > 0 else 0
     soc_terakhir = float(rows[-1].get("soc") or 0) / 100.0
@@ -30,7 +32,7 @@ def summarize_history_rows(rows, tariff_per_kwh, emission_factor, bess_capacity_
     load_avg_w = sum(load_values) / len(load_values) if load_values else 0
     essa_jam = (bess_capacity_wh * soc_terakhir) / load_avg_w if load_avg_w > 0.5 else 0
 
-    summary = {
+    return {
         "total_pv_kwh": round(total_pv_kwh, 3),
         "total_load_kwh": round(total_load_kwh, 3),
         "total_re_saving": round(total_re_saving, 2),
@@ -40,6 +42,8 @@ def summarize_history_rows(rows, tariff_per_kwh, emission_factor, bess_capacity_
         "total_rows": len(rows),
     }
 
+
+def _build_charts(rows):
     hourly_pv = defaultdict(float)
     hourly_load = defaultdict(float)
     for row in rows:
@@ -51,7 +55,7 @@ def summarize_history_rows(rows, tariff_per_kwh, emission_factor, bess_capacity_
     sorted_hours = sorted(hourly_pv)
     step = max(1, len(rows) // 500)
     sampled = rows[::step]
-    charts = {
+    return {
         "hourly_labels": sorted_hours,
         "hourly_pv_kwh": [round(hourly_pv[hour], 3) for hour in sorted_hours],
         "hourly_load_kwh": [round(hourly_load[hour], 3) for hour in sorted_hours],
@@ -60,7 +64,20 @@ def summarize_history_rows(rows, tariff_per_kwh, emission_factor, bess_capacity_
         "rf_pct": [float(row.get("rf_pct") or 0) for row in sampled],
     }
 
+
+def _table_rows(rows):
     table_rows = rows[-200:]
     for row in table_rows:
         row["timestamp"] = str(row["timestamp"])
+    return table_rows
+
+
+def summarize_history_rows(rows, tariff_per_kwh, emission_factor, bess_capacity_wh):
+    rows = [dict(row) for row in rows]
+    totals = _add_interval_metrics(rows, tariff_per_kwh, emission_factor)
+    summary = _build_summary(
+        rows, totals, tariff_per_kwh, emission_factor, bess_capacity_wh
+    )
+    charts = _build_charts(rows)
+    table_rows = _table_rows(rows)
     return summary, charts, table_rows

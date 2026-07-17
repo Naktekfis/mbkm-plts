@@ -1,108 +1,115 @@
-# Menjalankan Sistem
+# Getting Started
 
-## Prasyarat
+## Requirements
 
-- Docker Desktop atau Docker Engine dengan Compose v2.
-- Akses jaringan dari container ke MySQL laboratorium.
-- Kredensial read-only untuk database sumber.
-- Port host `1883`, `5000`, dan `5432` tersedia.
-- RAM dan ruang disk yang memadai untuk dua image TensorFlow 2.7 beserta modelnya.
+- Docker Desktop or Docker Engine with Docker Compose v2.
+- Network access from containers to the laboratory MySQL servers.
+- Read-only credentials for the source databases.
+- Available host ports `1883`, `5000`, and `5432`.
+- Enough memory and disk space for two TensorFlow 2.7 images and their bundled models.
 
-## Konfigurasi
+## Configuration
 
-Salin template environment:
+Create a local environment file on Windows PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Pada Linux/macOS:
+On Linux or macOS:
 
 ```bash
 cp .env.example .env
 ```
 
-Isi nilai `change-me` di `.env`. Variabel yang tersedia:
+Replace every `change-me` value in `.env`. The connection variables are:
 
-| Variabel | Dipakai oleh | Default host |
+| Variable | Used by | Default target |
 |---|---|---|
-| `POSTGRES_PASSWORD` | Seluruh service yang memakai PostgreSQL | Lokal Compose |
-| `MYSQL_SENSOR_*` | Sensor hybrid, PV, dan beban real-time | `192.168.1.147` |
-| `MYSQL_WEATHER_*` | Estimator PV | `192.168.1.147` |
-| `MYSQL_LOAD_*` | Estimator load | `192.168.1.149` |
+| `POSTGRES_PASSWORD` | All services that connect to PostgreSQL | Local Compose database |
+| `MYSQL_SENSOR_HOST`, `MYSQL_SENSOR_PORT`, `MYSQL_SENSOR_USER`, `MYSQL_SENSOR_PASS` | Real-time hybrid inverter, PV, and load sensor queries | `192.168.1.147:3306` |
+| `MYSQL_WEATHER_HOST`, `MYSQL_WEATHER_PORT`, `MYSQL_WEATHER_USER`, `MYSQL_WEATHER_PASS` | PV estimator weather query | `192.168.1.147:3306` |
+| `MYSQL_LOAD_HOST`, `MYSQL_LOAD_PORT`, `MYSQL_LOAD_USER`, `MYSQL_LOAD_PASS` | Load estimator query | `192.168.1.149:3306` |
 
-Parameter operasi opsional:
+Optional operating parameters:
 
-| Variabel | Default | Fungsi |
+| Variable | Default | Purpose |
 |---|---:|---|
-| `MAX_SOURCE_AGE_SECONDS` | 180 | Umur maksimum data sumber |
-| `MAX_SOURCE_SKEW_SECONDS` | 120 | Selisih maksimum timestamp antarsumber |
-| `MAX_INTERVAL_SECONDS` | 300 | Gap maksimum billing dan histori HMI |
-| `ESTIMATOR_RETRY_MINUTES` | 10 | Jeda retry estimator gagal |
-| `RESTART_COOLDOWN_SECONDS` | 600 | Cooldown restart HMI |
-| `MAX_RESTARTS` | 3 | Restart budget HMI |
+| `MAX_SOURCE_AGE_SECONDS` | 180 | Maximum accepted age of the oldest source record |
+| `MAX_SOURCE_SKEW_SECONDS` | 120 | Maximum timestamp difference among source records; also bounds accepted future skew |
+| `MAX_INTERVAL_SECONDS` | 300 | Maximum interval accumulated by billing and HMI history calculations |
+| `ESTIMATOR_RETRY_MINUTES` | 10 | Retry interval after an estimator has not succeeded for the current day |
+| `RESTART_COOLDOWN_SECONDS` | 600 | Minimum delay between HMI restart attempts |
+| `MAX_RESTARTS` | 3 | HMI restart budget before recovery is suppressed |
 
-Nama database masih menjadi bagian kontrak kode:
+The source database names are fixed in the runtime code:
 
-- Sensor: `smartgrid` dan `sielis`.
-- Cuaca: `smartgrid_cas`.
-- Estimator beban: `sielis`.
+- `service_sensor`: `smartgrid` and `sielis`.
+- PV weather source: `smartgrid_cas`.
+- Load estimator source: `sielis`.
 
-> [!CAUTION]
-> Jangan commit `.env`. Kredensial pada deployment sebaiknya memakai user MySQL read-only dan dibatasi ke host yang membutuhkan akses.
+> **Caution:** Do not commit `.env`. For deployments, use restricted read-only MySQL users and limit their access to only the required hosts and databases.
 
-## Menyalakan stack
+## Network Exposure
 
-Validasi konfigurasi lebih dahulu:
+The default Compose file publishes MQTT `1883`, HMI `5000`, and PostgreSQL `5432` on host interfaces. MQTT has no authentication or TLS, and the HMI has no documented authentication. Use the default stack only on a trusted network or a firewalled host; do not expose these ports directly to an untrusted network or the public internet.
+
+If access should be limited to the local host, replace the existing `ports` entries in `docker-compose.yml` rather than appending mappings in an override. Bind `mqtt_broker` as `127.0.0.1:1883:1883`, `service_hmi` as `127.0.0.1:5000:5000`, and `postgres` as `127.0.0.1:5432:5432`. Run `docker compose config` afterward and confirm that no wildcard mappings remain before starting the stack.
+
+## Start the Stack
+
+Validate the resolved configuration first:
 
 ```bash
 docker compose config --quiet
 ```
 
-Build dan jalankan seluruh service:
+Build and start all services:
 
 ```bash
 docker compose up --build -d
 ```
 
-Build pertama estimator dapat lama karena image TensorFlow dan model cukup besar. Lihat status:
+The first estimator build can take time because the TensorFlow images and model artifacts are large. Check container status with:
 
 ```bash
 docker compose ps
 ```
 
-Ikuti log pipeline utama:
+Follow the primary pipeline logs:
 
 ```bash
 docker compose logs -f service_sensor service_logger service_billing service_control
 ```
 
-Buka HMI di <http://localhost:5000>.
+Open the HMI at <http://localhost:5000>.
 
-## Tanda sistem bekerja
+## Verify the Startup
 
-1. `mqtt_broker` dan `postgres` berstatus running; PostgreSQL healthy.
-2. Log sensor berisi `PUBLISH [microgrid/telemetry]`.
-3. Log logger berisi `Database PostgreSQL siap digunakan` tanpa error koneksi MQTT.
-4. Log billing dan control muncul setelah payload sensor diterbitkan.
-5. `GET http://localhost:5000/health/ready` mengembalikan `200`.
-6. `GET http://localhost:5000/api/data` memiliki `data_status: OK`.
-7. Halaman System Health menampilkan freshness sumber data.
+1. `mqtt_broker` and `postgres` are running, and PostgreSQL is healthy.
+2. Sensor logs contain `PUBLISH [microgrid/telemetry]`.
+3. Logger output contains the exact runtime message `Database PostgreSQL siap digunakan.` and no MQTT connection error.
+4. Billing and control logs appear after the sensor publishes telemetry.
+5. `GET http://localhost:5000/health/ready` returns HTTP `200` with `{"status":"ready"}`.
+6. `GET http://localhost:5000/api/data` returns `"data_status":"OK"` after at least one sensor row is available.
+7. The HMI System Health view reports source freshness.
 
-## Menjalankan sebagian
+The readiness endpoint confirms that the HMI can query the `sensor_data` table. It does not guarantee that the latest row is fresh; use `/api/system/validity` for freshness information.
 
-Untuk mengembangkan dashboard tanpa pipeline sensor, jalankan infrastruktur, logger, dan HMI:
+## Start a Partial Stack
+
+To work on the dashboard without the sensor pipeline, start the infrastructure, logger, and HMI:
 
 ```bash
 docker compose up --build postgres mqtt_broker service_logger service_hmi
 ```
 
-Dashboard akan hidup, tetapi menampilkan nilai default sampai tabel berisi data.
+The dashboard starts with default values until the database contains data.
 
-## Menghentikan
+## Stop the Stack
 
 ```bash
 docker compose down
 ```
 
-Perintah tersebut mempertahankan data PostgreSQL. Untuk reset database lihat [operasi](operations.md#reset-data-lokal).
+This command preserves PostgreSQL data. See [Reset Local Data](operations.md#reset-local-data) for a destructive reset.

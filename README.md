@@ -1,25 +1,43 @@
 # Microgrid PLTS
 
-Sistem monitoring dan analisis microgrid PLTS berbasis Python, MQTT, PostgreSQL, Flask, serta model TensorFlow. Repo ini menggabungkan telemetri PV, BESS, grid, dan beban; menghitung metrik ekonomi; menjalankan DSS rule-based; membuat estimasi PV/load; dan menampilkannya pada HMI web.
+Microgrid PLTS is a monitoring and analysis system for a solar photovoltaic (PV) microgrid. It combines PV, battery energy storage system (BESS), utility grid, and load telemetry; calculates economic metrics; applies a rule-based decision support system (DSS); estimates daily PV generation and demand; and presents the results through a web-based human-machine interface (HMI).
 
-## Arsitektur singkat
+The stack uses Python, MQTT, PostgreSQL, Flask, TensorFlow, and Docker Compose.
 
-```text
-MySQL Lab -> Sensor -> MQTT -> Billing / Control / Logger -> PostgreSQL -> HMI
-                 MySQL Cuaca/Beban -> Estimator PV/Load ---^
+## System Overview
+
+```mermaid
+flowchart LR
+    MYSQL[Laboratory MySQL] --> SENSOR[service_sensor]
+    SENSOR -->|telemetry| MQTT[(MQTT broker)]
+    MQTT --> BILLING[service_billing]
+    MQTT --> CONTROL[service_control]
+    MQTT --> LOGGER[service_logger]
+    BILLING -->|billing results| MQTT
+    CONTROL -->|control decisions| MQTT
+    LOGGER --> PG[(PostgreSQL)]
+    WEATHER[Weather and load MySQL] --> EST[PV and load estimators]
+    EST --> PG
+    PG --> HMI[service_hmi]
 ```
 
-Setiap folder adalah service terpisah, sedangkan `docker-compose.yml` menjalankannya sebagai satu stack. Lihat [dokumentasi arsitektur](docs/architecture.md) untuk alur lengkap.
+Each service has its own directory, dependencies, and process. `docker-compose.yml` runs them together as one stack. See [Architecture](docs/architecture.md) for the complete data flow.
 
-## Menjalankan
+## Quick Start
 
-Prasyarat: Docker Compose v2 dan akses ke database MySQL laboratorium.
+Requirements:
+
+- Docker Engine or Docker Desktop with Docker Compose v2.
+- Network access to the laboratory MySQL databases.
+- Read-only credentials for the source databases.
+
+Create a local environment file on Windows PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Isi kredensial MySQL pada `.env`, lalu:
+Set the MySQL credentials and replace every `change-me` value in `.env`, then run:
 
 ```bash
 docker compose config --quiet
@@ -27,35 +45,39 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Buka <http://localhost:5000>.
+Open <http://localhost:5000>.
 
-> [!IMPORTANT]
-> MQTT dan PostgreSQL berjalan lokal di Compose, tetapi sumber telemetri/cuaca tetap berada di MySQL eksternal. Tanpa akses ke sumber tersebut, dashboard dapat hidup namun tidak berisi data aktual.
+> **Important:** Compose provides the local MQTT broker and PostgreSQL database, but telemetry, weather, and load source data remain in external laboratory MySQL databases. The dashboard can start without those sources, but it will not display current operational data.
 
-## Service utama
+For configuration details and startup checks, see [Getting Started](docs/getting-started.md).
 
-| Service | Peran |
+## Services
+
+| Service | Responsibility |
 |---|---|
-| `service_sensor` | Menggabungkan data MySQL yang fresh dan sinkron |
-| `service_logger` | Membuat schema dan menyimpan event MQTT |
-| `service_billing` | Menghitung RF, biaya, LCOE, ESSA, dan CO2 |
-| `service_control` | Menentukan status operasi dengan aturan EMS |
-| `service_estimation_pv` | Memperkirakan produksi PV harian |
-| `service_estimation_load` | Memperkirakan beban harian |
-| `service_pemantauan` | Memvalidasi range, freshness, dan frozen data |
-| `service_hmi` | Menyediakan dashboard dan API Flask |
-| `service_watchdog` | Memantau freshness dan readiness dengan restart terbatas |
+| `service_sensor` | Combines fresh, synchronized data from the source MySQL databases |
+| `service_logger` | Creates the runtime schema and stores MQTT events |
+| `service_billing` | Calculates renewable fraction, cost, LCOE, ESSA, and CO2 metrics |
+| `service_control` | Selects an operating status using rule-based EMS logic |
+| `service_estimation_pv` | Estimates hourly PV production for the current day |
+| `service_estimation_load` | Estimates minute-level demand for the current day |
+| `service_pemantauan` | Validates ranges, freshness, frozen values, and timestamp order |
+| `service_hmi` | Serves the Flask dashboard and HTTP API |
+| `service_watchdog` | Reports data freshness and performs limited HMI recovery |
 
-## Dokumentasi
+## Documentation
 
-- [Mulai dari sini](docs/index.md)
-- [Panduan menjalankan](docs/getting-started.md)
-- [Penjelasan setiap service](docs/services.md)
-- [Topic, payload, dan tabel](docs/data-contracts.md)
-- [Model estimasi](docs/estimation-models.md)
-- [Operasi dan troubleshooting](docs/operations.md)
+- [Documentation Home](docs/index.md)
+- [Architecture](docs/architecture.md)
+- [Getting Started](docs/getting-started.md)
+- [Services](docs/services.md)
+- [Data Contracts](docs/data-contracts.md)
+- [Estimation Models](docs/estimation-models.md)
+- [Operations and Troubleshooting](docs/operations.md)
 
-## Validasi lokal
+## Local Validation
+
+Run the repository's minimum checks after Python or Compose changes:
 
 ```bash
 python -m compileall -q service_sensor service_logger service_billing service_control service_pemantauan service_watchdog service_hmi_flask pv_service_estimation load_service_estimation
@@ -63,4 +85,4 @@ python -m unittest discover -s tests -v
 docker compose config --quiet
 ```
 
-Saat dokumentasi ini dibuat, validasi sintaks Python, tujuh regression test, dan konfigurasi Compose berhasil. Build/run container penuh tetap perlu dilakukan dengan Docker Engine aktif dan jaringan MySQL lab tersedia.
+These checks validate Python syntax, regression tests, and the resolved Compose configuration. A complete runtime check also requires an active Docker Engine and access to the laboratory network.

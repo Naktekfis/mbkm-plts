@@ -1,37 +1,38 @@
-# Dokumentasi Microgrid PLTS
+# Microgrid PLTS Documentation
 
-Dokumentasi ini menjelaskan cara bagian-bagian repo bekerja sebagai satu sistem. Mulai dari [arsitektur](architecture.md) jika ingin memahami gambaran besar, atau langsung ke [panduan menjalankan](getting-started.md) jika ingin menyalakan stack.
+This documentation explains how the repository's services operate as one system. Start with [Architecture](architecture.md) for the system model, or go directly to [Getting Started](getting-started.md) to configure and launch the stack.
 
-## Peta dokumentasi
+## Documentation Map
 
-| Halaman | Isi |
+| Page | Purpose |
 |---|---|
-| [Arsitektur](architecture.md) | Komponen, alur utama, dan alasan pemisahan service |
-| [Menjalankan sistem](getting-started.md) | Prasyarat, konfigurasi, startup, dan pemeriksaan awal |
-| [Service](services.md) | Tanggung jawab dan alur kode setiap service aktif |
-| [Kontrak data](data-contracts.md) | Topic MQTT, payload, tabel PostgreSQL, dan satuan |
-| [Model estimasi](estimation-models.md) | Pipeline PV/load, model TensorFlow, dan kode legacy |
-| [Operasi](operations.md) | Monitoring, troubleshooting, keterbatasan, dan reset |
+| [Architecture](architecture.md) | Components, data flow, system boundaries, and design decisions |
+| [Getting Started](getting-started.md) | Requirements, configuration, startup, and initial verification |
+| [Services](services.md) | Responsibilities and active runtime paths for each service |
+| [Data Contracts](data-contracts.md) | MQTT topics, payloads, PostgreSQL tables, units, and timestamps |
+| [Estimation Models](estimation-models.md) | PV and load pipelines, TensorFlow models, schedules, and legacy code |
+| [Operations](operations.md) | Monitoring, troubleshooting, backup, reset, and current limitations |
 
-## Ringkasan satu menit
+## System in One Minute
 
-Sistem mengambil telemetri PLTS, baterai, grid, dan beban dari MySQL laboratorium. `service_sensor` menyatukannya menjadi satu payload MQTT. Service lain menghitung ekonomi dan keputusan operasi, sedangkan `service_logger` menyimpan semua hasil ke PostgreSQL. HMI Flask membaca PostgreSQL dan menampilkannya di browser.
+The system reads solar PV, BESS, utility grid, and building load measurements from laboratory MySQL databases. `service_sensor` validates and combines those measurements into one MQTT telemetry payload. The billing and control services process each payload, while `service_logger` stores telemetry and derived results in PostgreSQL. The Flask HMI reads PostgreSQL and presents current values, history, estimates, and system health in a browser.
 
-Dua estimator berjalan harian. Estimator PV menggabungkan data cuaca, simulasi `pvlib`, dan model DNN. Estimator beban memilih model DNN sesuai hari dalam minggu. Seluruh komponen lokal diorkestrasi oleh `docker-compose.yml`.
+Two estimators run daily. The PV estimator combines weather observations, a `pvlib` physical simulation, and deep neural network (DNN) models. The load estimator selects a DNN model for the current day of the week. `docker-compose.yml` orchestrates all local components.
 
-> [!IMPORTANT]
-> Stack lokal sudah memiliki satu broker MQTT dan satu PostgreSQL, tetapi data sumber tetap bergantung pada MySQL laboratorium yang berada di luar Compose. Tanpa akses jaringan dan kredensial yang benar, container dapat hidup tetapi dashboard tidak memperoleh data aktual.
+> **Important:** The local stack includes one MQTT broker and one PostgreSQL database. Its source telemetry, weather, and load data still depend on laboratory MySQL databases outside Compose. Containers may be running while the dashboard has no current data if network access or credentials are unavailable.
 
-## Istilah singkat
+## Terminology
 
-| Istilah | Arti di repo ini |
+| Term | Meaning in this project |
 |---|---|
-| PLTS/PV | Sistem pembangkit listrik tenaga surya |
-| BESS | Penyimpanan energi baterai |
-| HMI | Dashboard web untuk operator |
-| EMS/DSS | Aturan pengambilan keputusan operasi microgrid |
-| SoC | Persentase muatan baterai |
-| EBT | Energi baru terbarukan |
-| RF | Renewable fraction, persentase beban yang ditopang EBT |
-| ESSA | Perkiraan lama baterai menopang beban |
-| LCOE | Perkiraan biaya energi sepanjang umur sistem |
+| PLTS | Indonesian abbreviation for a solar photovoltaic power plant or system |
+| PV | Photovoltaic solar generation |
+| BESS | Battery energy storage system |
+| HMI | Human-machine interface; the operator-facing web dashboard |
+| EMS | Energy management system |
+| DSS | Decision support system; the rule-based operating recommendation service |
+| SoC | Battery state of charge, expressed as a percentage |
+| EBT | Indonesian abbreviation for renewable energy (`Energi Baru Terbarukan`) |
+| RF | Renewable fraction; the percentage of load supplied by renewable power |
+| ESSA | Estimated duration for which the battery can support the load |
+| LCOE | Levelized cost of energy over the assumed project lifetime |

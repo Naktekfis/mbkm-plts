@@ -1,6 +1,8 @@
-# Operasi dan Troubleshooting
+# Operations and Troubleshooting
 
-## Pemeriksaan cepat
+## Quick Health Check
+
+Check container state and recent logs:
 
 ```bash
 docker compose ps
@@ -9,7 +11,7 @@ docker compose logs --tail=100 service_logger
 docker compose logs --tail=100 service_estimation_pv service_estimation_load
 ```
 
-Endpoint diagnostik:
+Diagnostic endpoints:
 
 ```text
 GET http://localhost:5000/api/data
@@ -18,77 +20,131 @@ GET http://localhost:5000/api/system/services
 GET http://localhost:5000/api/system/validity
 ```
 
-## Masalah umum
+`/health/ready` verifies that the HMI can query `sensor_data`; it does not check data freshness. `/api/system/validity` reports freshness and the latest validator result.
 
-### Dashboard hidup tetapi semua nilai nol
+## Common Problems
 
-Periksa log `service_sensor`. Penyebab paling umum adalah MySQL laboratorium tidak terjangkau, kredensial `.env` salah, schema sumber berbeda, atau tidak ada record hybrid/PV. Sensor sengaja tidak publish jika data hybrid atau PV kosong.
+### The Dashboard Runs but All Values Are Zero
 
-### Logger tidak menerima pesan
+Inspect `service_sensor` logs. Common causes are an unreachable laboratory MySQL server, incorrect `.env` credentials, a source schema mismatch, or missing hybrid, PV, or load rows. The sensor deliberately skips publication when any required source is absent or fails timestamp validation.
 
-Pastikan sensor, logger, billing, control, dan validator memakai `MQTT_BROKER=mqtt_broker`, broker running, dan sensor berhasil publish. Lihat log broker dan logger:
+The HMI can also show default values when its database query fails. Check HMI and PostgreSQL logs if the sensor and logger appear healthy:
 
 ```bash
-docker compose logs mqtt_broker service_logger
+docker compose logs service_hmi postgres
 ```
 
-### Estimator running tetapi prediksi kosong
+### The Logger Receives No Messages
 
-Scheduler menahan exception agar container tetap hidup dan mencoba ulang setiap sepuluh menit. Baca traceback pada log. Periksa coverage data kemarin, kompatibilitas model TensorFlow, dan tabel PostgreSQL.
+Confirm that the sensor, logger, billing, control, and validator use the Compose hostname `mqtt_broker`, that the broker is running, and that sensor logs show successful publication:
 
-### HMI gagal menampilkan status container
+```bash
+docker compose logs mqtt_broker service_sensor service_logger
+```
 
-Endpoint status membutuhkan mount `/var/run/docker.sock`. Docker Desktop harus menyediakan socket Linux kepada container. Tanpa socket, data utama HMI masih dapat bekerja, tetapi status container menjadi kosong/unknown.
+The exact sensor success prefix is `PUBLISH [microgrid/telemetry]`.
 
-### Watchdog terus me-restart service
+### An Estimator Is Running but Predictions Are Empty
 
-Watchdog melaporkan data lebih tua dari 180 detik tetapi tidak me-restart producer. HMI memiliki restart budget dan cooldown. Hentikan watchdog sementara saat maintenance Docker/HMI:
+The scheduler catches job exceptions and retries, so container state alone is not a success signal. Read the traceback in estimator logs. Check source-data coverage, MySQL connectivity, TensorFlow SavedModel compatibility, and PostgreSQL access.
+
+```bash
+docker compose logs --tail=200 service_estimation_pv service_estimation_load
+```
+
+Successful output contains exactly 24 PV rows or 1,440 load rows for the current day.
+
+### The HMI Cannot Display Container Status
+
+`GET /api/system/services` requires the `/var/run/docker.sock` mount. Docker Desktop must expose its Linux socket to the container. Without the socket, the main dashboard data can still work, but the service-status endpoint returns an error and an empty array.
+
+### The Watchdog Reports Stale Services
+
+The watchdog reports data older than 180 seconds but does not restart sensor, billing, or control producers. It only restarts the HMI after a failed readiness request, subject to its cooldown and restart budget.
+
+Stop the watchdog during planned Docker or HMI maintenance to prevent HMI recovery attempts:
 
 ```bash
 docker compose stop service_watchdog
 ```
 
-## Reset data lokal
+## Reset Local Data
 
-Menghapus container tanpa volume tidak menghapus PostgreSQL:
+Stopping and removing containers without removing volumes preserves PostgreSQL data:
 
 ```bash
 docker compose down
 ```
 
-Reset penuh menghapus seluruh histori lokal:
+A full reset removes all local PostgreSQL history:
 
 ```bash
 docker compose down -v
 ```
 
-> [!WARNING]
-> `docker compose down -v` bersifat destruktif dan menghapus volume `postgres_data`.
+> **Warning:** `docker compose down -v` is destructive. It removes the `postgres_data` volume and all data stored in it. Create and verify a backup first if the history is needed.
 
-## Backup PostgreSQL
+## Back Up PostgreSQL
 
-Contoh dump dari host:
+Use `-T` to disable pseudo-TTY allocation and create a custom-format dump. On Bash:
 
 ```bash
-docker compose exec postgres pg_dump -U microgrid_user microgrid_db > microgrid_backup.sql
+docker compose exec -T postgres pg_dump -U microgrid_user -d microgrid_db --format=custom > microgrid_backup.dump
 ```
 
-Simpan backup di luar repo jika mengandung data operasional.
+On Windows Command Prompt:
 
-## Keterbatasan saat ini
+```bat
+docker compose exec -T postgres pg_dump -U microgrid_user -d microgrid_db --format=custom > microgrid_backup.dump
+```
 
-- Tidak ada simulator data; sistem membutuhkan MySQL lab untuk telemetri aktual.
-- HMI memuat library frontend dari CDN dan tidak sepenuhnya offline.
-- MQTT tidak dikonfigurasi dengan autentikasi atau TLS.
-- Database memakai kredensial default Compose; gunakan secret yang berbeda untuk deployment.
-- Counter kumulatif proses billing reset saat restart; ringkasan HMI memakai metrik interval yang persisten.
-- Command HMI dinonaktifkan dengan respons `501` sampai consumer/driver aktuator tersedia.
-- Schema masih dikelola idempoten oleh kode, belum memakai migration framework terpisah.
-- Validasi estimator belum membuktikan akurasi model; golden dataset tetap diperlukan sebelum mengubah preprocessing TensorFlow.
+From Windows PowerShell, delegate binary redirection to `cmd.exe`:
 
-## Validasi sebelum perubahan
+```powershell
+cmd /c "docker compose exec -T postgres pg_dump -U microgrid_user -d microgrid_db --format=custom > microgrid_backup.dump"
+```
 
-Pemeriksaan minimum yang tersedia saat ini:
+Store backups outside the repository when they contain operational data. Verify the file and test restoration in a separate environment before relying on it.
+
+### Restore a Backup
+
+> **Warning:** The following restore uses `--clean --if-exists`. It drops database objects included in the archive before recreating them and can overwrite local history. Stop application services that write to PostgreSQL, confirm the target database, and preserve another backup first.
+
+On Bash:
+
+```bash
+docker compose exec -T postgres pg_restore -U microgrid_user -d microgrid_db --clean --if-exists < microgrid_backup.dump
+```
+
+On Windows Command Prompt:
+
+```bat
+docker compose exec -T postgres pg_restore -U microgrid_user -d microgrid_db --clean --if-exists < microgrid_backup.dump
+```
+
+From Windows PowerShell:
+
+```powershell
+cmd /c "docker compose exec -T postgres pg_restore -U microgrid_user -d microgrid_db --clean --if-exists < microgrid_backup.dump"
+```
+
+These backup and restore commands were checked against the repository's Compose service, database name, and user, but were not run against a live database.
+
+## Current Limitations
+
+- There is no data simulator; current telemetry requires access to the laboratory MySQL databases.
+- The HMI loads some frontend libraries from a CDN and is not fully offline.
+- MQTT has no authentication or TLS configuration.
+- Compose supplies development defaults for database identity and fallback passwords; use deployment-specific secrets.
+- Billing process-cumulative counters reset on restart. The HMI's current-day billing totals use persistent billing intervals, while `/api/history` derives date-range analysis from sensor samples and valid time intervals.
+- `POST /api/control` returns `501` until an authenticated and safety-bounded actuator consumer exists.
+- Runtime schema setup is idempotent application code rather than a separate migration framework.
+- Unit tests do not establish estimator model accuracy or full SavedModel and `pvlib` runtime compatibility.
+- Mounting the Docker socket into HMI and watchdog containers grants powerful host-level Docker access.
+
+## Repository Validation
+
+Run the minimum checks after Python or Compose changes:
 
 ```bash
 python -m compileall -q service_sensor service_logger service_billing service_control service_pemantauan service_watchdog service_hmi_flask pv_service_estimation load_service_estimation
@@ -96,10 +152,13 @@ python -m unittest discover -s tests -v
 docker compose config --quiet
 ```
 
-Jika Docker Engine aktif, lanjutkan dengan:
+With Docker Engine and the required network access available, continue with:
 
 ```bash
 docker compose build
 docker compose up -d
 docker compose ps
+docker compose logs --tail=100
 ```
+
+Do not interpret syntax, unit-test, or Compose configuration success as proof that the full stack can reach external MySQL sources or load both TensorFlow models.

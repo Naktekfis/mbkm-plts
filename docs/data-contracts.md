@@ -1,21 +1,21 @@
-# Kontrak Data
+# Data Contracts
 
-Daya aktif memakai Watt. `grid_apparent_power_va` adalah daya semu dan memakai VA. Energi memakai kWh, sedangkan SoC dan renewable fraction memakai persen.
+Runtime active power uses watts (W). `grid_apparent_power_va` is apparent power and uses volt-amperes (VA). Energy uses kilowatt-hours (kWh). SoC and renewable fraction use percentages.
 
-## Topic MQTT
+## MQTT Topics
 
-| Topic | Producer | Consumer | Bentuk data |
+| Topic | Producer | Consumers | Payload |
 |---|---|---|---|
-| `microgrid/telemetry` | Sensor | Logger, billing, control | JSON object telemetri |
-| `microgrid/billing` | Billing | Logger | JSON hasil ekonomi |
-| `microgrid/control` | Control | Logger | JSON keputusan DSS |
-| `microgrid/monitoring` | Validator | Logger | JSON status dan array alert |
+| `microgrid/telemetry` | `service_sensor` | Logger, billing, control | Telemetry JSON object |
+| `microgrid/billing` | `service_billing` | Logger | Economic metrics JSON object |
+| `microgrid/control` | `service_control` | Logger | DSS decision JSON object |
+| `microgrid/monitoring` | `service_pemantauan` | Logger | Validation status and alert array |
 
-Telemetri, billing, dan control memakai QoS 1. `telemetry_id` dan unique index membuat insert idempoten saat broker mengirim ulang pesan. Estimator menulis langsung ke PostgreSQL dan tidak memakai MQTT.
+Telemetry, billing, and control messages use QoS 1. Their shared `telemetry_id` and PostgreSQL unique indexes make inserts idempotent when the broker redelivers a message. Monitoring uses the default QoS. The estimators write directly to PostgreSQL and do not use MQTT.
 
-## Payload telemetri
+## Telemetry Payload
 
-Contoh disederhanakan:
+Simplified example:
 
 ```json
 {
@@ -33,44 +33,46 @@ Contoh disederhanakan:
   "bess_power_dc": 512.0,
   "dc_meassoc": 75.0,
   "dc_temperature": 30.0,
-  "p_inverter": 500.0,
+  "p_inverter": 400.0,
   "ac_frequency": 50.0,
   "A.Ms.Vol": 300.0,
   "A.Ms.Amp": 4.0,
   "B.Ms.Vol": 300.0,
   "B.Ms.Amp": 4.0,
-  "pac_inverter": 2200.0,
+  "pac_inverter": 1300.0,
   "GridMs.Hz": 50.0,
   "load_watt": 1800.0
 }
 ```
 
-`A.Ms.*`, `B.Ms.*`, dan `GridMs.Hz` mempertahankan nama kolom sumber. Logger mengubahnya menjadi nama PostgreSQL `a_ms_*`, `b_ms_*`, dan `gridms_hz`.
+`A.Ms.*`, `B.Ms.*`, and `GridMs.Hz` preserve source column names. The logger maps them to the PostgreSQL columns `a_ms_*`, `b_ms_*`, and `gridms_hz`.
 
-`telemetry_id` dibentuk secara deterministik dari tiga timestamp sumber. Snapshot sumber yang sama menghasilkan ID sama. Sensor tidak menerbitkan payload jika salah satu sumber kosong, terlalu tua, terlalu jauh selisih waktunya, atau berada di masa depan.
+`measured_at` is the latest of the three accepted source timestamps. `telemetry_id` is generated deterministically from all three timestamps, so the same source snapshot produces the same ID. The sensor does not publish when a required source or value is missing, timestamps fail freshness or synchronization checks, or a source timestamp is too far in the future.
 
-## Payload billing
+## Billing Payload
 
 ```json
 {
   "telemetry_id": "7bb3d733-c0b3-5e2e-a80d-5de0270b404c",
   "measured_at": "2026-07-16T12:00:00",
   "efisiensi_biaya_rp": 1250.5,
-  "renewable_fraction_pct": 72.4,
+  "renewable_fraction_pct": 69.47,
   "lcoe_dinamis_rp": 1100.0,
   "biaya_pln_murni_rp": 1800.0,
   "biaya_aktual_rp": 549.5,
-  "essa_jam": 4.2,
-  "co2_kg": 1.14,
+  "essa_jam": 8.533,
+  "co2_kg": 1.1392,
   "interval_load_kwh": 0.03,
-  "interval_renewable_kwh": 0.02,
-  "interval_saving_rp": 19.1,
-  "interval_co2_kg": 0.0174,
+  "interval_renewable_kwh": 0.028333,
+  "interval_saving_rp": 27.0583,
+  "interval_co2_kg": 0.02465,
   "interval_hours": 0.016667
 }
 ```
 
-## Payload control
+The Indonesian field names are part of the runtime contract and must not be translated. `efisiensi_biaya_rp`, `renewable_fraction_pct`, `lcoe_dinamis_rp`, `biaya_pln_murni_rp`, `biaya_aktual_rp`, and `co2_kg` are process-cumulative economic display metrics. For a valid interval, `essa_jam` reflects the current battery endurance estimate. It is `0.0` when interval calculation is unavailable on the first event, a repeated or backward timestamp, or a gap above `MAX_INTERVAL_SECONDS`; that fallback does not indicate an empty battery. The `interval_*` fields persist each accepted interval and support the HMI's daily billing totals.
+
+## Control Payload
 
 ```json
 {
@@ -78,35 +80,58 @@ Contoh disederhanakan:
   "measured_at": "2026-07-16T12:00:00",
   "status_operasi": "DISCHARGING",
   "keputusan_aktif": "Defisit PV 500.0 W. BESS men-discharge untuk cover beban.",
-  "daya_pln_dihitung_watt": 1400.0
+  "daya_pln_dihitung_watt": 100.0
 }
 ```
 
-## Tabel PostgreSQL
+This control result corresponds to the telemetry example above: PV output is 1,300 W, load is 1,800 W, SoC is 75%, and positive BESS discharge is 400 W. The 500 W PV deficit selects `DISCHARGING`, while the runtime formula calculates grid contribution as `max(1800 - 1300 - 400, 0) = 100 W`. `keputusan_aktif` preserves the Indonesian message generated by `evaluate_ems_rules()`.
 
-| Tabel | Isi | Penulis utama |
+## Monitoring Payload
+
+Simplified successful run:
+
+```json
+{
+  "timestamp": "2026-07-16T12:00:00+07:00",
+  "status_global": "OK",
+  "jumlah_alert": 0,
+  "alerts": []
+}
+```
+
+`status_global` is `ERROR` if any alert has `ERROR` severity, otherwise `WARNING` if any warning exists, and `OK` when no alerts are present. Alert objects use the contract fields `parameter`, `nilai_aktual`, `jenis_alert`, `severity`, and `pesan`.
+
+The producer's payload `timestamp` is not persisted. When the logger receives the message, it records its own receipt time in both `monitoring_runs.timestamp` and each related `monitoring_alerts.timestamp` row.
+
+The unit of `nilai_aktual` depends on `parameter`. Current range and frozen-value checks use the source field's unit, including W, VA, V, A, percent, or degrees C. Timestamp freshness and future-time alerts use seconds. Checks without a meaningful numeric value, such as missing data or timestamp-order anomalies, may store `null`.
+
+## PostgreSQL Tables
+
+| Table | Contents | Primary writer |
 |---|---|---|
-| `sensor_data` | Telemetri gabungan | Logger |
-| `billing_data` | Metrik ekonomi kumulatif proses | Logger |
-| `control_data` | Status dan pesan DSS | Logger |
-| `monitoring_alerts` | Alert per parameter | Logger |
-| `monitoring_runs` | Status setiap eksekusi validator, termasuk `OK` | Logger |
-| `pv_estimasi` | Prediksi PV per jam | Estimator PV |
-| `load_estimasi` | Prediksi load per menit | Estimator load |
+| `sensor_data` | Combined telemetry | Logger |
+| `billing_data` | Cumulative display metrics and persistent interval metrics | Logger |
+| `control_data` | DSS statuses and messages | Logger |
+| `monitoring_alerts` | One row per validator alert | Logger |
+| `monitoring_runs` | Every validator run, including `OK` runs | Logger |
+| `pv_estimasi` | Hourly PV predictions | PV estimator |
+| `load_estimasi` | Minute-level load predictions | Load estimator |
 
-`pv_estimasi.timestamp` dan `load_estimasi.timestamp` adalah primary key. Estimator memakai `ON CONFLICT` sehingga prediksi untuk timestamp yang sama diperbarui, bukan diduplikasi.
+`pv_estimasi.timestamp` and `load_estimasi.timestamp` are primary keys. Both estimators use `ON CONFLICT ... DO UPDATE`, replacing predictions for an existing timestamp rather than creating duplicates.
 
-## Konvensi tanda
+## Sign Conventions
 
-| Field | Positif | Negatif |
+| Field | Positive | Negative |
 |---|---|---|
-| `p_inverter` | BESS/hybrid inverter menyuplai panel | BESS menyerap daya untuk charging |
-| `bess_power_dc` | BESS discharge | BESS charging |
+| `p_inverter` | BESS or hybrid inverter supplies the AC panel | BESS absorbs power for charging |
+| `bess_power_dc` | BESS discharges on the DC side | BESS charges on the DC side |
 
-Billing dan DSS menggunakan `p_inverter` untuk menentukan kontribusi discharge.
+Billing and DSS logic use `p_inverter` to determine the BESS discharge contribution.
 
-## Timestamp
+## Timestamps
 
-Container memakai `TZ=Asia/Jakarta`. Tabel saat ini menggunakan `TIMESTAMP` tanpa timezone. `sensor_data.timestamp` adalah waktu ukur gabungan, `ingested_at` adalah waktu logger menerima pesan, dan tiga kolom `source_timestamp_*` mempertahankan waktu masing-masing sumber. Hindari mengubah timezone host/container secara terpisah karena perhitungan freshness mengasumsikan WIB.
+Containers use `TZ=Asia/Jakarta` (WIB, UTC+7). Runtime tables currently use PostgreSQL `TIMESTAMP` without time zone. `sensor_data.timestamp` stores the combined measurement time, `ingested_at` stores logger receipt time, and `source_timestamp_hybrid`, `source_timestamp_pv`, and `source_timestamp_load` retain the individual source times.
 
-Billing hanya mengakumulasi interval monoton sampai 300 detik. Gap lebih besar, timestamp berulang, dan timestamp mundur menghasilkan energi interval nol agar outage tidak berubah menjadi konsumsi fiktif.
+Keep host, container, MySQL, and PostgreSQL clock assumptions aligned. Freshness calculations interpret naive timestamps as WIB.
+
+Billing accumulates only increasing intervals up to `MAX_INTERVAL_SECONDS`, 300 seconds by default. Repeated timestamps, backward timestamps, and larger gaps produce zero interval energy so an outage or duplicate does not become fictitious consumption.

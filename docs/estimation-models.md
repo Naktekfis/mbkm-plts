@@ -1,10 +1,10 @@
-# Model Estimasi
+# Estimation Models
 
-Kedua estimator memakai TensorFlow 2.7.0 karena SavedModel dibuat dengan versi tersebut. Dockerfile sengaja memakai `tensorflow/tensorflow:2.7.0`; upgrade TensorFlow perlu pengujian atau ekspor ulang model.
+Both estimator Dockerfiles pin `tensorflow/tensorflow:2.7.0`. The PV Dockerfile explicitly attributes this pin to compatibility with `pv_model` and `pv_dnn`; the repository does not independently document how the load SavedModel artifacts were produced. Treat TensorFlow 2.7.0 as the tested repository baseline, and do not upgrade TensorFlow or convert either model format without testing both estimator pipelines.
 
-## Estimasi PV
+## PV Estimation
 
-Jalur runtime:
+Active runtime path:
 
 ```text
 service_estimation.py
@@ -12,26 +12,27 @@ service_estimation.py
   -> aws_model2_openmeteo.py
   -> query_openmeteo.py
   -> pvlib_model.py
-  -> pv_model/ dan pv_dnn/
+  -> pv_model/ and pv_dnn/
 ```
 
-Alurnya:
+Pipeline:
 
-1. `query_openmeteo.get_query()` mengambil data cuaca kemarin dari tabel `smartgrid_cas.weather`.
-2. Timestamp dinormalisasi per menit; data harus mencakup minimal 18 jam unik, rentang 20 jam, dan tidak memiliki gap di atas 3 jam.
-3. Model `pv_model/` memprediksi DNI dari GHI dan fitur waktu.
-4. `pvlib_model.pvlib_instantiate()` mensimulasikan sistem PV fisik di Bandung.
-5. Model `pv_dnn/` mengoreksi keluaran AC dari `pvlib`.
-6. Output diambil menjadi 24 titik per jam untuk hari ini.
-7. `main.run()` memvalidasi 24 output lalu melakukan satu batch upsert ke `pv_estimasi`.
+1. `query_openmeteo.get_query()` reads the previous day's weather records from `smartgrid_cas.weather`.
+2. The query groups observations by minute. It requires at least 18 distinct covered hours, a span of at least 20 hours, and no gap longer than 3 hours.
+3. `_prepare_minutely_weather()` creates a complete 1,440-minute WIB index and interpolates irradiance, temperature, and wind speed.
+4. The SavedModel in `pv_model/` predicts direct normal irradiance (DNI) from global horizontal irradiance (GHI) and time features.
+5. `pvlib_model.pvlib_instantiate()` simulates the physical PV system in Bandung.
+6. The SavedModel in `pv_dnn/` corrects the simulated AC output.
+7. The pipeline samples 24 hourly values and assigns them to the current day.
+8. `main.run()` validates the 24-row output and batch-upserts it into `pv_estimasi`.
 
-Tahap interpolasi cuaca, pembentukan fitur waktu, prediksi DNI, simulasi `pvlib`, koreksi DNN, dan pembentukan output per jam dipisahkan sebagai helper internal agar kontrak numeriknya dapat diuji tanpa memuat model TensorFlow.
+The physical model uses a Bandung location near latitude `-6.89`, longitude `107.61`, and altitude 770 m. The array faces east at a 2-degree tilt, with 16 modules per string and 2 strings per inverter.
 
-Model dan parameter fisik berada langsung di repo. Lokasi simulasi adalah sekitar Bandung (`-6.89`, `107.61`, 770 m), panel menghadap timur dengan tilt 2 derajat, 16 modul per string, dan 2 string.
+The model treats yesterday's observed weather as today's profile. This is a persistence assumption in the current estimator, not a future weather forecast.
 
-## Estimasi load
+## Load Estimation
 
-Jalur runtime:
+Active runtime path:
 
 ```text
 service_estimation_load.py
@@ -41,42 +42,42 @@ service_estimation_load.py
   -> model_bebanv2/model/modelbeban_<Day>/
 ```
 
-Alurnya:
+Pipeline:
 
-1. `query.get_query()` mengambil beban meter 6 untuk hari kemarin dan mengagregasi data per menit.
-2. Input harus memiliki minimal 1.200 menit, rentang 22 jam, dan gap maksimum 15 menit sebelum direindex dan diinterpolasi.
-3. Daya dihitung sebagai `3 * A * PF * VLN`.
-4. Kode membentuk moving average dan fitur bulan, tanggal, jam, serta menit.
-5. Model dipilih berdasarkan nama hari ini, misalnya `modelbeban_Monday`.
-6. Prediksi 1.440 menit dari 00:00 sampai 23:59 divalidasi lalu di-upsert dalam satu batch.
+1. `query.get_query()` reads the previous day's meter 6 records from `sielis.datapengukuran` and aggregates them by minute.
+2. Input requires at least 1,200 rows, a span of at least 22 hours, and no gap longer than 15 minutes.
+3. `_prepare_minute_input()` reindexes and interpolates a complete minute series.
+4. Power is calculated as `3 * A * PF * VLN`.
+5. The code builds its legacy moving-average feature and month, day, hour, and minute features.
+6. It selects the SavedModel for the current weekday, such as `modelbeban_Monday`.
+7. The model produces 1,440 values from 00:00 through 23:59 WIB for the current day.
+8. `main.run()` validates the row count and batch-upserts the output into `load_estimasi`.
 
-Penyiapan input per menit, perhitungan daya, moving average, penyusunan fitur, prediksi, dan pembentukan output dipisahkan sebagai helper internal agar preprocessing dapat diuji tanpa memuat SavedModel TensorFlow.
+`model_bebanv2/training/` contains weekday training CSV files. Runtime jobs perform inference only and do not retrain the models.
 
-Folder `model_bebanv2/training/` berisi CSV training per hari. Runtime tidak melakukan training ulang.
+## Schedule and Retry Behavior
 
-Uji unit helper estimator memakai fake dan mock terkontrol. Hasilnya tidak membuktikan kompatibilitas runtime dengan SavedModel TensorFlow atau instalasi `pvlib` yang sebenarnya.
-
-## Jadwal
-
-| Service | Saat container start | Jadwal berikutnya |
+| Service | At container startup | Daily schedule |
 |---|---|---|
-| PV | Langsung menjalankan satu job | Setiap hari 00:05 WIB |
-| Load | Langsung menjalankan satu job | Setiap hari 00:10 WIB |
+| PV estimator | Runs one job immediately | 00:05 WIB |
+| Load estimator | Runs one job immediately | 00:10 WIB |
 
-Exception job dicatat dan dicoba ulang setiap sepuluh menit sampai target hari berhasil. Status container `running` tetap belum membuktikan prediksi berhasil; periksa log dan tabel estimasi.
+Each scheduler catches job exceptions so the container remains running. If the current day's output has not succeeded, it retries every `ESTIMATOR_RETRY_MINUTES`, ten minutes by default. A `running` container therefore does not prove that predictions were generated; inspect the logs and estimation tables.
 
-Cuaca kemarin dipakai sebagai profil untuk estimasi hari ini. Ini adalah asumsi persistence forecast pada model saat ini, bukan prakiraan cuaca masa depan.
+## Validation Scope
 
-## Kode non-runtime
+Estimator helper tests use controlled fakes and mocks. They can validate preprocessing and output contracts without loading TensorFlow. They do not prove compatibility with the bundled SavedModel artifacts, the installed `pvlib` runtime, source database data, or model accuracy. Use a representative golden dataset before changing TensorFlow, `pvlib`, scaling, interpolation, feature order, or time handling.
 
-File berikut tidak dipanggil oleh Dockerfile/entry point aktif:
+## Non-Runtime Code
 
-- `pv_service_estimation/aws_model.py`: pipeline PV lama dengan path host-spesifik.
-- `pv_service_estimation/aws_model2.py` dan `query.py`: alternatif sebelum jalur cuaca aktif.
-- `pv_service_estimation/PVDNN.py`: skrip training/eksperimen.
-- `pv_service_estimation/pvlib_dnn.py`: eksperimen yang belum lengkap.
-- `pv_service_estimation/time_pv.py` dan `load_service_estimation/time_load.py`: benchmark.
-- `pv_service_estimation/pv_hourly.py` dan `fixpac.py`: maintenance database lama.
-- `load_service_estimation/delete.py`: maintenance destruktif.
+The active Dockerfiles and entry points do not call these files:
 
-Jangan memasukkan file tersebut ke jalur runtime tanpa memastikan path, schema, kredensial, dan asumsi modelnya masih valid.
+- `pv_service_estimation/aws_model.py`: older PV pipeline with host-specific paths.
+- `pv_service_estimation/aws_model2.py` and `pv_service_estimation/query.py`: alternatives that predate the active weather path.
+- `pv_service_estimation/PVDNN.py`: training and experiment script.
+- `pv_service_estimation/pvlib_dnn.py`: incomplete experiment.
+- `pv_service_estimation/time_pv.py` and `load_service_estimation/time_load.py`: benchmarks.
+- `pv_service_estimation/pv_hourly.py` and `pv_service_estimation/fixpac.py`: older database maintenance scripts.
+- `load_service_estimation/delete.py`: destructive maintenance script.
+
+Do not add these files to the runtime path without revalidating their filesystem paths, schemas, credentials, dependencies, and model assumptions.
